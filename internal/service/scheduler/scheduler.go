@@ -106,6 +106,7 @@ type Dependencies struct {
 	DAGRepository        *persis.DAGRepository
 	DAGRunRepository     *persis.DAGRunRepository
 	QueueStore           queuedomain.QueueStore
+	QueuePauseStore      queuedomain.PauseStore
 	ProcRepository       *persis.ProcRepository
 	ServiceRegistry      serviceregistry.ServiceRegistry
 	CoordinatorClient    dispatch.Dispatcher
@@ -171,6 +172,7 @@ func New(cfg *config.Config, deps Dependencies) (*Scheduler, error) {
 	scheduler.queueProcessor.dispatchTaskStore = deps.DispatchTaskStore
 	scheduler.queueProcessor.dispatchAdmissionStore = dispatchAdmissionStoreFromTaskStore(deps.DispatchTaskStore)
 	scheduler.queueProcessor.workerHeartbeatStore = deps.WorkerHeartbeatStore
+	scheduler.queueProcessor.queuePauseStore = deps.QueuePauseStore
 	if deps.WorkerStaleAfter != 0 {
 		scheduler.queueProcessor.workerStaleAfter = deps.WorkerStaleAfter
 	}

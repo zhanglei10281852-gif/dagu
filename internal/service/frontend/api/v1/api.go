@@ -72,6 +72,7 @@ type API struct {
 	artifactRepository   *persis.ArtifactRepository
 	dagRunMgr            runtime.Manager
 	queueStore           queue.QueueStore
+	queuePauseStore      queue.PauseStore
 	procRepository       processRepository
 	dagRunLeaseStore     dispatch.DAGRunLeaseStore
 	workerHeartbeatStore dispatch.WorkerHeartbeatStore
@@ -368,6 +369,14 @@ func WithSchedulerStateStore(store schedulerstate.Store) APIOption {
 func WithSchedulerPauseStore(store schedulerstate.PauseStore) APIOption {
 	return func(a *API) {
 		a.schedulerPauseStore = store
+	}
+}
+
+// WithQueuePauseStore sets the durable per-queue pause store used by the
+// queue pause endpoints and embedded in queue resources.
+func WithQueuePauseStore(store queue.PauseStore) APIOption {
+	return func(a *API) {
+		a.queuePauseStore = store
 	}
 }
 

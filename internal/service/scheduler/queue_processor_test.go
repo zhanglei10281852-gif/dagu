@@ -63,6 +63,7 @@ type queueFixture struct {
 	dispatchStore    dispatch.DispatchTaskStore
 	distributedDir   string
 	queueStore       *store.QueueStore
+	pauseStore       *store.QueuePauseStore
 	procRepository   queueProcessRepository
 	processor        *QueueProcessor
 	dag              *ir.DAG
@@ -79,6 +80,9 @@ func newQueueFixture(t *testing.T) *queueFixture {
 	ctx := logger.WithFixedLogger(context.Background(), logger.NewLogger(
 		logger.WithDebug(), logger.WithFormat("text"), logger.WithWriter(logBuffer),
 	))
+	// The queue store and pause store use separate collection handles over the
+	// same directory, modeling the API and scheduler processes sharing storage.
+	queueDir := filepath.Join(tmpDir, "queue")
 
 	return &queueFixture{
 		t: t, ctx: ctx, logBuffer: logBuffer,
@@ -86,7 +90,8 @@ func newQueueFixture(t *testing.T) *queueFixture {
 		dagRunRepository: testutil.NewFileDAGRunRepository(filepath.Join(tmpDir, "dag-runs"), persis.DAGRunRepositoryOptions{LatestStatusToday: true}),
 		leaseStore:       store.NewDAGRunLeaseStore(leaseCollection),
 		dispatchStore:    store.NewDispatchTaskStore(file.NewCollection(distributedDir)),
-		queueStore:       store.NewQueueStore(file.NewCollection(filepath.Join(tmpDir, "queue"))),
+		queueStore:       store.NewQueueStore(file.NewCollection(queueDir)),
+		pauseStore:       store.NewQueuePauseStore(file.NewCollection(queueDir)),
 		procRepository:   newSchedulerTestProcRepository(filepath.Join(tmpDir, "proc"), nil),
 	}
 }
@@ -142,6 +147,7 @@ func (f *queueFixture) withProcessor(cfg config.Queues, opts ...QueueProcessorOp
 	options := append([]QueueProcessorOption{
 		WithBackoffConfig(BackoffConfig{InitialInterval: 10 * time.Millisecond, MaxInterval: 50 * time.Millisecond, MaxRetries: 2}),
 		WithDAGRunLeaseStore(f.leaseStore),
+		WithQueuePauseStore(f.pauseStore),
 	}, opts...)
 	f.processor = NewQueueProcessor(f.queueStore, f.dagRunRepository, f.procRepository,
 		NewDAGExecutor(nil, launcher.NewSubCmdBuilder(&config.Config{Paths: config.PathsConfig{Executable: "/usr/bin/dagu"}}), config.ExecutionModeLocal, ""),
@@ -642,7 +648,7 @@ func TestQueueDispatcher_DistributedDispatchHandsOffWithAdmissionToken(t *testin
 	dispatched := queueDispatcher.dispatchQueuedItem(f.ctx, items[0], f.dag.Name, queueDispatchBatch{
 		maxConcurrency:        1,
 		nonAdmissionOccupancy: 0,
-	}, func() {}, func() {})
+	}, queuePauseGeneration{available: true}, func() {}, func() {})
 	require.True(t, dispatched)
 	assert.NotEmpty(t, dispatcher.LastRequest().AdmissionReservationToken)
 	procRepository.AssertExpectations(t)
@@ -1232,7 +1238,7 @@ func TestQueueProcessor_SuspendedManualQueuedRunStillDispatches(t *testing.T) {
 	dispatched := queueDispatcher.dispatchQueuedItem(f.ctx, items[0], dagName, queueDispatchBatch{
 		maxConcurrency:        1,
 		nonAdmissionOccupancy: 0,
-	}, func() {}, func() {})
+	}, queuePauseGeneration{available: true}, func() {}, func() {})
 	require.True(t, dispatched)
 	assert.Equal(t, int32(1), dispatcher.callCount.Load())
 

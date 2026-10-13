@@ -19,6 +19,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/dispatch"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/pagination"
+	"github.com/dagucloud/dagu/v2/internal/queue"
 )
 
 const (
@@ -201,6 +202,7 @@ type queueInfo struct {
 	// queuedCountCapped reports that queuedCount hit queuedCountScanCap and is
 	// therefore a lower bound rather than an exact total.
 	queuedCountCapped bool
+	pause             *queue.PauseState
 }
 
 // getOrCreateQueue returns an existing queue from the map or creates a new one.
@@ -308,6 +310,8 @@ func (a *API) collectQueues(ctx context.Context, onlyQueue string) (map[string]*
 		queue.running = append(queue.running, summaries...)
 	}
 
+	a.attachQueuePauseStates(ctx, queueMap, onlyQueue)
+
 	if a.queueStore == nil {
 		return queueMap, nil
 	}
@@ -376,7 +380,61 @@ func (a *API) toQueueResource(_ context.Context, q *queueInfo) (api.Queue, error
 	if q.maxConcurrency > 0 {
 		queue.MaxConcurrency = &q.maxConcurrency
 	}
+	if q.pause != nil {
+		pause := toQueuePauseStateResource(*q.pause)
+		queue.Pause = &pause
+	}
 	return queue, nil
+}
+
+// attachQueuePauseStates annotates collected queues with their durable pause
+// state. A paused queue with no running or queued activity is still surfaced
+// so operators can see and resume it. Reads are best-effort: a pause store
+// failure never hides queue counts, while the scheduler independently
+// withholds dispatch claims when pause state is unreadable.
+func (a *API) attachQueuePauseStates(ctx context.Context, queueMap map[string]*queueInfo, onlyQueue string) {
+	if a.queuePauseStore == nil {
+		return
+	}
+
+	if onlyQueue != "" {
+		state, err := a.queuePauseStore.Get(ctx, onlyQueue)
+		if err != nil {
+			logger.Warn(ctx, "Failed to read queue pause state while collecting queue",
+				tag.Queue(onlyQueue), tag.Error(err))
+			return
+		}
+		// A direct lookup surfaces the queue whenever any pause record exists,
+		// even after resume, so the detail endpoint stays answerable.
+		attachQueuePause(queueMap, state, a.config, true)
+		return
+	}
+
+	states, err := a.queuePauseStore.List(ctx)
+	if err != nil {
+		logger.Warn(ctx, "Failed to list queue pause states while collecting queues", tag.Error(err))
+		return
+	}
+	for _, state := range states {
+		attachQueuePause(queueMap, state, a.config, false)
+	}
+}
+
+func attachQueuePause(queueMap map[string]*queueInfo, state queue.PauseState, cfg *config.Config, alwaysSurface bool) {
+	q, exists := queueMap[state.QueueName]
+	if !exists {
+		// A never-paused queue has a zero state and must not become visible
+		// just because it was looked up. List view only pins active pauses;
+		// direct lookups additionally surface queues with a pause record that
+		// are currently resumed.
+		recordExists := state.Paused || state.Version > 0
+		if !recordExists || (!state.Paused && !alwaysSurface) {
+			return
+		}
+		q = getOrCreateQueue(queueMap, state.QueueName, cfg)
+	}
+	pause := state
+	q.pause = &pause
 }
 
 func (a *API) listVisibleQueuedItems(ctx context.Context, queueName string, limit int, cursor string) ([]api.DAGRunSummary, string, error) {

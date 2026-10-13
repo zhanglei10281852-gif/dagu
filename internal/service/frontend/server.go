@@ -283,6 +283,7 @@ type ServerConfig struct {
 	ArtifactRepository   *persis.ArtifactRepository
 	ProcRepository       *persis.ProcRepository
 	QueueStore           queue.QueueStore
+	QueuePauseStore      queue.PauseStore
 	DAGRunManager        runtime.Manager
 	CoordinatorClient    coordinator.Client
 	ServiceRegistry      serviceregistry.ServiceRegistry
@@ -334,6 +335,9 @@ func NewServer(setup ServerConfig, opts ...ServerOption) (*Server, error) {
 	}
 	opts = append(opts, WithAPIOption(apiv1.WithSchedulerStateStore(setup.SchedulerStateStore)))
 	opts = append(opts, WithAPIOption(apiv1.WithSchedulerPauseStore(setup.SchedulerPauseStore)))
+	if setup.QueuePauseStore != nil {
+		opts = append(opts, WithAPIOption(apiv1.WithQueuePauseStore(setup.QueuePauseStore)))
+	}
 
 	remoteNodes := make([]string, 0, len(cfg.Server.RemoteNodes))
 	for _, n := range cfg.Server.RemoteNodes {

@@ -8,11 +8,13 @@ import { components, QueueType } from '@/api/v1/schema';
 import { AppBarContext } from '@/contexts/AppBarContext';
 import QueueDetailsPage from '..';
 
-const { clientMock, getMock, useQueryMock } = vi.hoisted(() => {
+const { clientMock, getMock, postMock, useQueryMock } = vi.hoisted(() => {
   const get = vi.fn();
+  const post = vi.fn();
   return {
-    clientMock: { GET: get },
+    clientMock: { GET: get, POST: post },
     getMock: get,
+    postMock: post,
     useQueryMock: vi.fn(),
   };
 });
@@ -20,6 +22,10 @@ const { clientMock, getMock, useQueryMock } = vi.hoisted(() => {
 vi.mock('@/hooks/api', () => ({
   useClient: () => clientMock,
   useQuery: useQueryMock,
+}));
+
+vi.mock('@/contexts/AuthContext', () => ({
+  useCanExecute: () => true,
 }));
 
 vi.mock('@/features/dag-runs/components/dag-run-details', () => ({
@@ -66,7 +72,9 @@ function renderPage(queue: components['schemas']['Queue']): void {
 describe('QueueDetailsPage', () => {
   beforeEach(() => {
     getMock.mockReset();
+    postMock.mockReset();
     useQueryMock.mockReset();
+    postMock.mockResolvedValue({ error: undefined });
     getMock.mockResolvedValue({
       data: { items: [] },
       error: undefined,
@@ -120,5 +128,57 @@ describe('QueueDetailsPage', () => {
       await screen.findByText('No queued items in this queue.')
     ).toBeVisible();
     expect(getMock).not.toHaveBeenCalled();
+  });
+
+  it('pauses the queue with an optional reason', async () => {
+    renderPage(cappedZeroQueue);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Pause queue' }));
+    const reasonInput = await screen.findByLabelText('Reason (optional)');
+    fireEvent.change(reasonInput, { target: { value: 'downstream work' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Pause queue' }));
+
+    await waitFor(() => {
+      expect(postMock).toHaveBeenCalledTimes(1);
+    });
+    expect(postMock).toHaveBeenCalledWith(
+      '/queues/{name}/pause',
+      expect.objectContaining({
+        params: expect.objectContaining({
+          path: { name: cappedZeroQueue.name },
+        }),
+        body: { paused: true, reason: 'downstream work' },
+      })
+    );
+  });
+
+  it('shows the pause banner and resumes a paused queue', async () => {
+    renderPage({
+      ...cappedZeroQueue,
+      pause: {
+        paused: true,
+        reason: 'maintenance',
+        pausedBy: 'alice',
+        pausedAt: '2026-10-13T01:00:00Z',
+      },
+    });
+
+    expect(
+      await screen.findByText(
+        'Queue paused. No new runs start; queued runs are kept in order.'
+      )
+    ).toBeVisible();
+    const banner = await screen.findByRole('status');
+    expect(banner.textContent).toContain('maintenance');
+    expect(banner.textContent).toContain('alice');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Resume queue' }));
+    await waitFor(() => {
+      expect(postMock).toHaveBeenCalledTimes(1);
+    });
+    expect(postMock).toHaveBeenCalledWith(
+      '/queues/{name}/pause',
+      expect.objectContaining({ body: { paused: false } })
+    );
   });
 });

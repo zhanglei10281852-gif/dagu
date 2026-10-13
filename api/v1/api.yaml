@@ -4980,6 +4980,82 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+
+  /queues/{name}/pause:
+    get:
+      summary: "Get pause state for a specific queue"
+      description: "Returns whether the queue is currently paused, who paused it, why, and when. Readable by any authenticated user so the reason a queue stopped dispatching is visible to everyone. A queue that has never been paused reports paused=false."
+      operationId: "getQueuePauseState"
+      tags:
+        - "queues"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - name: name
+          in: path
+          description: "Queue name"
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "A successful response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuePauseState"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    post:
+      summary: "Pause or resume a specific queue"
+      description: |
+        Pauses or resumes dispatch for one queue. Requires run permission.
+
+        Pausing stops new local starts and distributed admissions for this queue only. Already running DAG-runs continue, and queued items stay in the queue with their priority and ordering intact until resume; they are never dropped. Repeating the same paused value is idempotent. Other queues and the global scheduler pause are unaffected.
+      operationId: "updateQueuePauseState"
+      tags:
+        - "queues"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - name: name
+          in: path
+          description: "Queue name"
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                paused:
+                  type: boolean
+                  description: "True pauses the queue, false resumes it"
+                reason:
+                  type: string
+                  maxLength: 512
+                  description: "Operator-facing explanation shown while paused"
+              required:
+                - paused
+      responses:
+        "200":
+          description: "The persisted queue pause state"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuePauseState"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /services/resources/history:
     get:
       summary: "Get resource usage history"
@@ -16323,12 +16399,33 @@ components:
           description: "List of currently running DAG-runs (bounded by maxConcurrency)"
           items:
             $ref: "#/components/schemas/DAGRunSummary"
+        pause:
+          $ref: "#/components/schemas/QueuePauseState"
       required:
         - name
         - type
         - runningCount
         - queuedCount
         - running
+
+    QueuePauseState:
+      type: object
+      description: "Durable pause state of one queue"
+      properties:
+        paused:
+          type: boolean
+          description: "Whether the queue is currently paused"
+        pausedAt:
+          type: string
+          description: "RFC3339 timestamp when the queue was paused"
+        pausedBy:
+          type: string
+          description: "User who paused the queue"
+        reason:
+          type: string
+          description: "Operator-facing explanation shown while the queue is paused"
+      required:
+        - paused
 
     QueuedDAGRunsPageResponse:
       type: object

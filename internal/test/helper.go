@@ -291,6 +291,7 @@ func Setup(t *testing.T, opts ...HelperOption) Helper {
 	procRepository := newProcRepository(cfg)
 	backend := file.NewBackend(cfg.Paths)
 	queueStore := store.NewQueueStore(backend.Collection(persis.CollectionQueue))
+	queuePauseStore := store.NewQueuePauseStore(backend.Collection(persis.CollectionQueue))
 	stateStore := store.NewDAGStateStore(backend.Collection(persis.CollectionDAGState))
 	serviceMonitor := file.NewServiceRegistry(cfg)
 	workerHeartbeatStore := store.NewWorkerHeartbeatStore(backend.Collection(persis.CollectionWorkerHeartbeats))
@@ -322,6 +323,7 @@ func Setup(t *testing.T, opts ...HelperOption) Helper {
 		ProcRepository:            procRepository,
 		Backend:                   backend,
 		QueueStore:                queueStore,
+		QueuePauseStore:           queuePauseStore,
 		StateStore:                stateStore,
 		ServiceRegistry:           serviceMonitor,
 		DispatchTaskStore:         dispatchTaskStore,
@@ -534,6 +536,7 @@ type Helper struct {
 	ProcRepository            *persis.ProcRepository
 	Backend                   persis.Backend
 	QueueStore                queue.QueueStore
+	QueuePauseStore           queue.PauseStore
 	StateStore                dagrun.StateStore
 	ServiceRegistry           serviceregistry.ServiceRegistry
 	DispatchTaskStore         dispatch.DispatchTaskStore

@@ -102,6 +102,7 @@ func (e startupExecutionError) Unwrap() error {
 // QueueProcessor is responsible for processing queued DAG runs.
 type QueueProcessor struct {
 	queueStore             queuedomain.QueueStore
+	queuePauseStore        queuedomain.PauseStore
 	dagRunRepository       *persis.DAGRunRepository
 	procRepository         queueProcessRepository
 	dagRunLeaseStore       dispatch.DAGRunLeaseStore
@@ -146,6 +147,18 @@ type queueScanGeneration struct {
 	queueRevision int64
 	workers       workerEligibilityGeneration
 	capacity      queueCapacityGeneration
+	pause         queuePauseGeneration
+}
+
+// queuePauseGeneration identifies the durable per-queue pause state observed
+// by a scan. available is false when the state could not be read; such scans
+// fail closed and never dispatch. A parked paused scan resumes only when the
+// observed pair changes, and a handoff re-checks the pair so a pause landing
+// after item selection still blocks the final claim.
+type queuePauseGeneration struct {
+	available bool
+	paused    bool
+	version   int64
 }
 
 func (q *queue) getMaxConcurrency() int {
@@ -300,6 +313,14 @@ func dispatchAdmissionStoreFromTaskStore(store dispatch.DispatchTaskStore) dispa
 func WithIsSuspended(isSuspended IsSuspendedFunc) QueueProcessorOption {
 	return func(p *QueueProcessor) {
 		p.isSuspended = isSuspended
+	}
+}
+
+// WithQueuePauseStore sets the durable per-queue pause store used to gate
+// scans and the final dispatch handoff.
+func WithQueuePauseStore(pauseStore queuedomain.PauseStore) QueueProcessorOption {
+	return func(p *QueueProcessor) {
+		p.queuePauseStore = pauseStore
 	}
 }
 
@@ -484,6 +505,7 @@ func (p *QueueProcessor) isClosed() bool {
 func (p *QueueProcessor) newQueueDispatcher() *queueDispatcher {
 	return newQueueDispatcher(queueDispatchDeps{
 		queueStore:             p.queueStore,
+		queuePauseStore:        p.queuePauseStore,
 		dagRunRepository:       p.dagRunRepository,
 		procRepository:         p.procRepository,
 		dagRunLeaseStore:       p.dagRunLeaseStore,
@@ -542,6 +564,33 @@ func (p *QueueProcessor) processQueueItems(
 	logger.Debug(ctx, "Processing queue", tag.MaxConcurrency(q.getMaxConcurrency()))
 	dispatcher := p.newQueueDispatcher()
 
+	// The pause gate runs before any capacity read or item claim. A read
+	// failure fails closed: no new claims for this queue, while the backlog
+	// stays untouched. Both states feed the scan generation so parked scans
+	// reset from the queue head once the state changes.
+	pauseGeneration := queuePauseGeneration{available: true}
+	if p.queuePauseStore != nil {
+		pause, err := p.queuePauseStore.Get(ctx, queueName)
+		if err != nil {
+			logger.Error(ctx, "Failed to read queue pause state; withholding new dispatch claims",
+				tag.Queue(queueName), tag.Error(err))
+			q.deferScan(queueScanGeneration{pause: queuePauseGeneration{}}, time.Now().Add(queueProcessFallbackInterval))
+			p.wakeUp()
+			return
+		}
+		pauseGeneration = queuePauseGeneration{
+			available: true,
+			paused:    pause.Paused,
+			version:   pause.Version,
+		}
+		if pause.Paused {
+			logger.Info(ctx, "Queue is paused; leaving backlog pending", tag.Queue(queueName))
+			q.parkScan(queueScanGeneration{pause: pauseGeneration})
+			p.wakeUp()
+			return
+		}
+	}
+
 	revision, err := p.queueStore.Revision(ctx, queueName)
 	if err != nil {
 		logger.Error(ctx, "Failed to read queue revision", tag.Error(err))
@@ -552,6 +601,7 @@ func (p *QueueProcessor) processQueueItems(
 		queueRevision: revision,
 		workers:       workerGeneration,
 		capacity:      capacity.queueCapacityGeneration,
+		pause:         pauseGeneration,
 	}
 	cursor, parked := q.scanPosition(generation, time.Now())
 	if parked {
@@ -609,7 +659,7 @@ func (p *QueueProcessor) processQueueItems(
 					logger.Error(ctx, "Queue item processing panicked", tag.Error(panicToError(r)))
 				}
 			}()
-			if !dispatcher.dispatchQueuedItem(ctx, queuedItem, queueName, batch, q.incInflight, q.decInflight) {
+			if !dispatcher.dispatchQueuedItem(ctx, queuedItem, queueName, batch, generation.pause, q.incInflight, q.decInflight) {
 				return
 			}
 			if _, err := p.queueStore.DeleteByItemIDs(ctx, queueName, []string{queuedItem.ID()}); err != nil {

@@ -75,6 +75,7 @@ func newServer(ctx *Context, rs *resource.Service, stores frontend.Stores, opts 
 		ArtifactRepository:   ctx.Persistence.ArtifactRepository,
 		ProcRepository:       ctx.Persistence.ProcRepository,
 		QueueStore:           ctx.Persistence.QueueStore,
+		QueuePauseStore:      ctx.Persistence.QueuePauseStore,
 		DAGRunManager:        ctx.DAGRunMgr,
 		CoordinatorClient:    coordinatorClient,
 		ServiceRegistry:      ctx.Persistence.ServiceRegistry,

@@ -34,6 +34,12 @@ type Scheduler struct {
 	PauseStore schedulerstate.PauseStore
 }
 
+// QueuePauseStoreForTest returns the durable per-queue pause store backing
+// this scheduler's queue collection.
+func (s *Scheduler) QueuePauseStoreForTest() queue.PauseStore {
+	return s.Helper.QueuePauseStore
+}
+
 // SetupScheduler creates a test scheduler instance with all dependencies
 func SetupScheduler(t *testing.T, opts ...HelperOption) *Scheduler {
 	t.Helper()
@@ -113,6 +119,7 @@ func (s *Scheduler) NewSchedulerInstance(t *testing.T) (*scheduler.Scheduler, er
 		DAGRepository:       s.DAGRepository,
 		DAGRunRepository:    s.DAGRunRepository,
 		QueueStore:          s.QueueStore,
+		QueuePauseStore:     s.QueuePauseStore,
 		ProcRepository:      s.ProcRepository,
 		ServiceRegistry:     s.ServiceRegistry,
 		CoordinatorClient:   s.CoordinatorCli,

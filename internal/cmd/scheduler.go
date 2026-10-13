@@ -68,6 +68,7 @@ func newScheduler(ctx *Context, deps scheduler.Dependencies) (*scheduler.Schedul
 	deps.DAGRepository = ctx.Persistence.DAGRepository
 	deps.DAGRunRepository = ctx.Persistence.DAGRunRepository
 	deps.QueueStore = ctx.Persistence.QueueStore
+	deps.QueuePauseStore = ctx.Persistence.QueuePauseStore
 	deps.ProcRepository = ctx.Persistence.ProcRepository
 	deps.ServiceRegistry = ctx.Persistence.ServiceRegistry
 	deps.CoordinatorClient = coordinatorClient

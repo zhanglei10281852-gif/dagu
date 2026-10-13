@@ -114,6 +114,7 @@ func (srv *Server) newFrontendServer(listener net.Listener) (*frontend.Server, e
 		ArtifactRepository:   srv.ArtifactRepository,
 		ProcRepository:       srv.ProcRepository,
 		QueueStore:           srv.QueueStore,
+		QueuePauseStore:      srv.QueuePauseStore,
 		DAGRunManager:        srv.DAGRunMgr,
 		CoordinatorClient:    cc,
 		ServiceRegistry:      srv.ServiceRegistry,

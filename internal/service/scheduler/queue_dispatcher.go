@@ -27,6 +27,7 @@ import (
 
 type queueDispatchDeps struct {
 	queueStore             queuedomain.QueueStore
+	queuePauseStore        queuedomain.PauseStore
 	dagRunRepository       *persis.DAGRunRepository
 	procRepository         queueProcessRepository
 	dagRunLeaseStore       dispatch.DAGRunLeaseStore
@@ -46,6 +47,7 @@ type queueDispatchDeps struct {
 // queueDispatcher owns queue-item dispatch decisions after a queue has capacity.
 type queueDispatcher struct {
 	queueStore             queuedomain.QueueStore
+	queuePauseStore        queuedomain.PauseStore
 	dagRunRepository       *persis.DAGRunRepository
 	procRepository         queueProcessRepository
 	dagRunLeaseStore       dispatch.DAGRunLeaseStore
@@ -352,6 +354,7 @@ func newQueueDispatcher(deps queueDispatchDeps) *queueDispatcher {
 	}
 	return &queueDispatcher{
 		queueStore:             deps.queueStore,
+		queuePauseStore:        deps.queuePauseStore,
 		dagRunRepository:       deps.dagRunRepository,
 		procRepository:         deps.procRepository,
 		dagRunLeaseStore:       deps.dagRunLeaseStore,
@@ -688,11 +691,41 @@ func (d *queueDispatcher) queueCapacity(
 	return capacity
 }
 
+// queuePauseAllowsDispatch re-reads durable pause state at the final handoff.
+// It reports false when the queue is paused, when the pause generation moved
+// (a pause and possibly resume landed after the scan selected its items), or
+// when the state cannot be read. Every false result leaves the item queued.
+func (d *queueDispatcher) queuePauseAllowsDispatch(
+	ctx context.Context,
+	queueName string,
+	observed queuePauseGeneration,
+) bool {
+	if d.queuePauseStore == nil {
+		return true
+	}
+	state, err := d.queuePauseStore.Get(ctx, queueName)
+	if err != nil {
+		logger.Error(ctx, "Failed to re-read queue pause state before dispatch; leaving run queued",
+			tag.Queue(queueName), tag.Error(err))
+		return false
+	}
+	if state.Paused || state.Version != observed.version {
+		logger.Info(ctx, "Queue pause generation changed after item selection; leaving run queued for resume",
+			tag.Queue(queueName),
+			slog.Int64("observed_version", observed.version),
+			slog.Int64("current_version", state.Version),
+		)
+		return false
+	}
+	return true
+}
+
 func (d *queueDispatcher) dispatchQueuedItem(
 	ctx context.Context,
 	item queuedomain.QueuedItemData,
 	queueName string,
 	batch queueDispatchBatch,
+	pauseGeneration queuePauseGeneration,
 	incInflight,
 	decInflight func(),
 ) bool {
@@ -781,6 +814,15 @@ func (d *queueDispatcher) dispatchQueuedItem(
 				slog.Duration("queue_age", queueAge),
 			)
 		}
+	}
+
+	// Final pause gate at the ownership-claim boundary. The scan may have
+	// selected this item before a pause landed; re-reading the same pause
+	// generation here ensures such items stay queued instead of starting a
+	// local run or reserving a distributed admission. Runs that already passed
+	// this point keep executing.
+	if !d.queuePauseAllowsDispatch(ctx, queueName, pauseGeneration) {
+		return false
 	}
 
 	incInflight()

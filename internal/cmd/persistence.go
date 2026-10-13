@@ -30,6 +30,7 @@ type Persistence struct {
 	ArtifactRepository        *persis.ArtifactRepository
 	ProcRepository            *persis.ProcRepository
 	QueueStore                queue.QueueStore
+	QueuePauseStore           queue.PauseStore
 	StateStore                dagrun.StateStore
 	SchedulerStateStore       schedulerstate.Store
 	SchedulerPauseStore       schedulerstate.PauseStore
@@ -81,6 +82,7 @@ func newFilePersistence(
 		backend.Collection(persis.CollectionActiveDistributedRuns),
 	)
 	queueStore := store.NewQueueStore(backend.Collection(persis.CollectionQueue))
+	queuePauseStore := store.NewQueuePauseStore(backend.Collection(persis.CollectionQueue))
 	stateStore := store.NewDAGStateStore(backend.Collection(persis.CollectionDAGState))
 	schedulerStateStore := store.NewSchedulerStateStore(
 		backend.Collection(persis.CollectionSchedulerState),
@@ -112,6 +114,7 @@ func newFilePersistence(
 		ArtifactRepository:        artifactRepository,
 		ProcRepository:            procRepository,
 		QueueStore:                queueStore,
+		QueuePauseStore:           queuePauseStore,
 		StateStore:                stateStore,
 		SchedulerStateStore:       schedulerStateStore,
 		SchedulerPauseStore:       schedulerPauseStore,

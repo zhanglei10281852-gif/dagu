@@ -1,0 +1,47 @@
+{
+  "id": "dagucloud-dagu-415ec5c9-ea68-46be-8287-813898706832",
+  "syncRevision": 5,
+  "completionStatus": "部分完成",
+  "collectionDecision": "收录：长程题",
+  "reality": "值班运维需要在下游维护窗口只冻结一个队列并保留积压，同时让其他队列继续运行。工程难点在于让跨 server、scheduler 和重启持久的暂停状态同时约束扫描、已选条目的最终本地启动与分布式 admission、恢复唤醒、优先级顺序、容量限制以及 API/UI 可观察性，并保持全局 scheduler pause 的既有丢弃语义独立。",
+  "artifactResult": "1 通过\n2 未通过 暂停状态最终读取完成后到本地 ExecuteDAG 或分布式 ReserveAdmission 之间没有共享原子边界，暂停写入在该窗口成功后已选条目仍继续启动\n3 未通过 暂停状态最终读取完成后到本地 ExecuteDAG 或分布式 ReserveAdmission 之间没有共享原子边界，暂停写入在该窗口成功后已选条目仍继续启动\n4 通过\n5 通过\n6 通过\n7 通过",
+  "runResult": "1 通过\n2 未通过 暂停状态最终读取完成后到本地 ExecuteDAG 或分布式 ReserveAdmission 之间没有共享原子边界，暂停写入在该窗口成功后已选条目仍继续启动\n3 未通过 暂停状态最终读取完成后到本地 ExecuteDAG 或分布式 ReserveAdmission 之间没有共享原子边界，暂停写入在该窗口成功后已选条目仍继续启动\n4 通过\n5 通过\n6 通过\n7 通过",
+  "rubricResults": [
+    {
+      "id": 1,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 2,
+      "passed": false,
+      "reason": "暂停状态最终读取完成后到本地 ExecuteDAG 或分布式 ReserveAdmission 之间没有共享原子边界，暂停写入在该窗口成功后已选条目仍继续启动"
+    },
+    {
+      "id": 3,
+      "passed": false,
+      "reason": "暂停状态最终读取完成后到本地 ExecuteDAG 或分布式 ReserveAdmission 之间没有共享原子边界，暂停写入在该窗口成功后已选条目仍继续启动"
+    },
+    {
+      "id": 4,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 5,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 6,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 7,
+      "passed": true,
+      "reason": ""
+    }
+  ],
+  "artifactMaterials": "同一 Trae 会话的原始轨迹、登记基线差异、严格 YAML 判分清单、逐条代码审计报告和唯一截图均已核验。持久存储与调度器定向无缓存验证通过；前端接口广泛验证在 491.002 秒后结束并记录失败。代码审计确认暂停状态最终读取与 ExecuteDAG 或 ReserveAdmission 之间缺少共享原子边界。"
+}

@@ -1958,6 +1958,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/queues/{name}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get pause state for a specific queue
+         * @description Returns whether the queue is currently paused, who paused it, why, and when. Readable by any authenticated user so the reason a queue stopped dispatching is visible to everyone. A queue that has never been paused reports paused=false.
+         */
+        get: operations["getQueuePauseState"];
+        put?: never;
+        /**
+         * Pause or resume a specific queue
+         * @description Pauses or resumes dispatch for one queue. Requires run permission.
+         *
+         *     Pausing stops new local starts and distributed admissions for this queue only. Already running DAG-runs continue, and queued items stay in the queue with their priority and ordering intact until resume; they are never dropped. Repeating the same paused value is idempotent. Other queues and the global scheduler pause are unaffected.
+         *
+         */
+        post: operations["updateQueuePauseState"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/services/resources/history": {
         parameters: {
             query?: never;
@@ -6573,6 +6600,18 @@ export interface components {
             queuedCountCapped?: boolean;
             /** @description List of currently running DAG-runs (bounded by maxConcurrency) */
             running: components["schemas"]["DAGRunSummary"][];
+            pause?: components["schemas"]["QueuePauseState"];
+        };
+        /** @description Durable pause state of one queue */
+        QueuePauseState: {
+            /** @description Whether the queue is currently paused */
+            paused: boolean;
+            /** @description RFC3339 timestamp when the queue was paused */
+            pausedAt?: string;
+            /** @description User who paused the queue */
+            pausedBy?: string;
+            /** @description Operator-facing explanation shown while the queue is paused */
+            reason?: string;
         };
         /** @description Forward-only paginated queued DAG-run response */
         QueuedDAGRunsPageResponse: {
@@ -13632,6 +13671,85 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getQueuePauseState: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description Queue name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueuePauseState"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    updateQueuePauseState: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description Queue name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description True pauses the queue, false resumes it */
+                    paused: boolean;
+                    /** @description Operator-facing explanation shown while paused */
+                    reason?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description The persisted queue pause state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueuePauseState"];
                 };
             };
             /** @description Generic error response */

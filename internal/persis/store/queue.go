@@ -363,12 +363,31 @@ func (s *QueueStore) queueFingerprint(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	itemIDs := make([]string, 0, len(ids))
+	relevantIDs := make([]string, 0, len(ids))
 	for _, id := range ids {
+		// Pause records are included so pausing or resuming a queue wakes the
+		// scheduler watcher even when the backlog itself does not change.
 		if isQueueItemRecordID(id) {
-			itemIDs = append(itemIDs, id)
+			relevantIDs = append(relevantIDs, id)
+		} else if isQueuePauseRecordID(id) {
+			// Resume rewrites the same record ID, so the fingerprint also
+			// carries the record version token.
+			token, supported, tokenErr := collectionRecordVersion(ctx, s.col, id)
+			if tokenErr != nil {
+				return "", tokenErr
+			}
+			if supported {
+				relevantIDs = append(relevantIDs, id+"@"+token)
+			} else {
+				relevantIDs = append(relevantIDs, id)
+			}
 		}
 	}
-	sort.Strings(itemIDs)
-	return strings.Join(itemIDs, "\n"), nil
+	sort.Strings(relevantIDs)
+	return strings.Join(relevantIDs, "\n"), nil
+}
+
+func isQueuePauseRecordID(id string) bool {
+	_, ok := queueNameFromPauseRecordID(id)
+	return ok
 }

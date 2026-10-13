@@ -24,6 +24,10 @@ import { RefreshButton } from '@/components/ui/refresh-button';
 import { AppBarContext } from '@/contexts/AppBarContext';
 import { DAGRunDetailsModal } from '@/features/dag-runs/components/dag-run-details';
 import { formatQueuedCount } from '@/features/queues/components/QueueCard';
+import {
+  QueuePauseBanner,
+  QueuePauseButton,
+} from '@/features/queues/components/QueuePauseControl';
 import QueueRunsTable from '@/features/queues/components/QueueRunsTable';
 import {
   QueueBatchResult,
@@ -289,9 +293,16 @@ function QueueDetailsPage() {
           </div>
 
           <div className="flex items-center gap-2">
+            <QueuePauseButton
+              queueName={queueName}
+              pause={queue?.pause}
+              onChanged={handleRefresh}
+            />
             <RefreshButton onRefresh={handleRefresh} />
           </div>
         </div>
+
+        <QueuePauseBanner pause={queue?.pause} />
 
         <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-sm text-muted-foreground">
           <div className="flex items-baseline gap-1">

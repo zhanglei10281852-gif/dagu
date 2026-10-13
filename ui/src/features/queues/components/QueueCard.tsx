@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Yota Hamada
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, PauseCircle } from 'lucide-react';
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { components } from '@/api/v1/schema';
@@ -17,6 +17,7 @@ function QueueCard({ queue }: QueueCardProps) {
   const runningCount = queue.runningCount || 0;
   const queuedCount = queue.queuedCount || 0;
   const queuedCapped = queue.queuedCountCapped === true;
+  const paused = queue.pause?.paused === true;
   const utilization = queue.maxConcurrency
     ? Math.round((runningCount / queue.maxConcurrency) * 100)
     : null;
@@ -24,13 +25,27 @@ function QueueCard({ queue }: QueueCardProps) {
   return (
     <Link
       to={`/queues/${encodeURIComponent(queue.name)}`}
-      className="card-obsidian group flex h-full flex-col gap-4 px-4 py-4 transition-all duration-200 hover:border-border-strong hover:bg-muted/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className={cn(
+        'card-obsidian group flex h-full flex-col gap-4 px-4 py-4 transition-all duration-200 hover:border-border-strong hover:bg-muted/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        paused && 'border-warning/40'
+      )}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="whitespace-normal break-words text-base font-semibold text-foreground">
-            {queue.name}
-          </h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="whitespace-normal break-words text-base font-semibold text-foreground">
+              {queue.name}
+            </h3>
+            {paused && (
+              <span
+                data-testid="queue-paused-badge"
+                className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning"
+              >
+                <PauseCircle className="h-3 w-3" />
+                <I18nText text={'Paused'} />
+              </span>
+            )}
+          </div>
           <p className="mt-1 text-sm text-muted-foreground">
             {formatActivityLine(runningCount, queuedCount, queuedCapped)}
           </p>
