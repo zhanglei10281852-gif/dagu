@@ -247,7 +247,7 @@ func TestDataRootRetentionCleanup(t *testing.T) {
 		assert.True(t, fileutil.FileExists(dagRun2.baseDir), "dag-run 2 should exist before cleanup")
 
 		// Remove all DAG runs before the current time
-		removedIDs, err := root.removeOldBefore(root.Context, persis.NewUTC(time.Now()), false)
+		removedIDs, _, err := root.removeOldBefore(root.Context, persis.NewUTC(time.Now()), false)
 		require.NoError(t, err)
 		assert.Len(t, removedIDs, 2)
 
@@ -294,7 +294,7 @@ func TestDataRootRetentionCleanup(t *testing.T) {
 		assert.True(t, fileutil.FileExists(dagRun2.baseDir), "Recent dag-run should exist before cleanup")
 
 		// Remove DAG runs before the seven-day cutoff (should remove old but keep recent)
-		removedIDs, err := root.removeOldBefore(root.Context, persis.NewUTC(time.Now().AddDate(0, 0, -7)), false)
+		removedIDs, _, err := root.removeOldBefore(root.Context, persis.NewUTC(time.Now().AddDate(0, 0, -7)), false)
 		require.NoError(t, err)
 		assert.Len(t, removedIDs, 1)
 
@@ -329,7 +329,7 @@ func TestDataRootRetentionCleanup(t *testing.T) {
 			dagRuns = append(dagRuns, dagRun)
 		}
 
-		removedIDs, err := root.RemoveOldByRuns(root.Context, 2, false)
+		removedIDs, _, err := root.RemoveOldByRuns(root.Context, 2, false)
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []string{"dag-run-1", "dag-run-2"}, removedIDs)
 
@@ -365,7 +365,7 @@ func TestDataRootRetentionCleanup(t *testing.T) {
 			require.NoError(t, attempt.Close(root.Context))
 		}
 
-		removedIDs, err := root.RemoveOldByRuns(root.Context, 1, true)
+		removedIDs, _, err := root.RemoveOldByRuns(root.Context, 1, true)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"old-dag-run"}, removedIDs)
 		assert.True(t, fileutil.FileExists(oldRun.baseDir), "dry-run should not delete old dag-run")
@@ -400,7 +400,7 @@ func TestDataRootRetentionCleanup(t *testing.T) {
 		}))
 		require.NoError(t, attempt.Close(root.Context))
 
-		removedIDs, err := root.RemoveOldByRuns(root.Context, 1, false)
+		removedIDs, _, err := root.RemoveOldByRuns(root.Context, 1, false)
 		require.NoError(t, err)
 		assert.Empty(t, removedIDs)
 		assert.True(t, fileutil.FileExists(activeRun.baseDir), "active dag-run should be preserved")
@@ -438,7 +438,7 @@ func TestDataRootRetentionCleanup(t *testing.T) {
 		}))
 		require.NoError(t, attempt.Close(root.Context))
 
-		removedIDs, err := root.RemoveOldByRuns(root.Context, 1, false)
+		removedIDs, _, err := root.RemoveOldByRuns(root.Context, 1, false)
 		require.NoError(t, err)
 		assert.Empty(t, removedIDs)
 		assert.True(t, fileutil.FileExists(oldRun.baseDir), "dag-run with a newer statusless attempt should be preserved")
@@ -483,7 +483,7 @@ func TestDataRootRetentionCleanup(t *testing.T) {
 		assert.True(t, fileutil.FileExists(dagRun2.baseDir), "dag-run 2 should exist")
 
 		// Remove all DAG runs before the current time
-		removedIDs, err := root.removeOldBefore(root.Context, persis.NewUTC(time.Now()), false)
+		removedIDs, _, err := root.removeOldBefore(root.Context, persis.NewUTC(time.Now()), false)
 		require.NoError(t, err)
 		assert.Len(t, removedIDs, 2)
 
@@ -534,7 +534,7 @@ func TestDataRootRetentionCleanup(t *testing.T) {
 
 		// Remove all DAG runs before the current time
 		// Wait status should be preserved because it's considered "active"
-		removedIDs, err := root.removeOldBefore(root.Context, persis.NewUTC(time.Now()), false)
+		removedIDs, _, err := root.removeOldBefore(root.Context, persis.NewUTC(time.Now()), false)
 		require.NoError(t, err)
 		assert.Len(t, removedIDs, 1, "Only completed run should be removed")
 		assert.Contains(t, removedIDs, "completed-run", "Completed run should be in removed list")
@@ -571,7 +571,7 @@ func TestDataRootRetentionCleanup(t *testing.T) {
 
 		require.DirExists(t, artifactDir)
 
-		removedIDs, err := root.removeOldBefore(root.Context, persis.NewUTC(time.Now()), false)
+		removedIDs, _, err := root.removeOldBefore(root.Context, persis.NewUTC(time.Now()), false)
 		require.NoError(t, err)
 		assert.Contains(t, removedIDs, "artifact-run")
 		assert.NoDirExists(t, artifactDir)

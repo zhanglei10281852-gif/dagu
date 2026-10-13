@@ -48,12 +48,24 @@ func (DAGRunStoreStub) FindSubAttempt(context.Context, ir.DAGRunRef, string) (da
 	panic("unexpected DAG-run store call: FindSubAttempt")
 }
 
-func (DAGRunStoreStub) RemoveOldDAGRuns(context.Context, persis.DAGRunRetentionRequest) ([]ir.DAGRunRef, error) {
+func (DAGRunStoreStub) RemoveOldDAGRuns(context.Context, persis.DAGRunRetentionRequest) (persis.DAGRunRetentionSelection, error) {
 	panic("unexpected DAG-run store call: RemoveOldDAGRuns")
 }
 
 func (DAGRunStoreStub) RemoveDAGRun(context.Context, persis.DAGRunRemoveRequest) error {
 	panic("unexpected DAG-run store call: RemoveDAGRun")
+}
+
+func (DAGRunStoreStub) GetRetentionLock(context.Context, ir.DAGRunRef) (*persis.RetentionLock, error) {
+	panic("unexpected DAG-run store call: GetRetentionLock")
+}
+
+func (DAGRunStoreStub) SetRetentionLock(context.Context, persis.DAGRunSetRetentionLockRequest) (*persis.RetentionLock, error) {
+	panic("unexpected DAG-run store call: SetRetentionLock")
+}
+
+func (DAGRunStoreStub) ReleaseRetentionLock(context.Context, ir.DAGRunRef) error {
+	panic("unexpected DAG-run store call: ReleaseRetentionLock")
 }
 
 func (DAGRunStoreStub) PruneArtifacts(context.Context, persis.ArtifactPruneRequest) (*persis.ArtifactPruneResult, error) {

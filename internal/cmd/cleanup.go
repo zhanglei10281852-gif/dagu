@@ -24,7 +24,8 @@ Deprecated: prefer 'dagu rm --history' (or 'dagu rm -H').
 By default, removes all history except for currently active runs.
 Use --retention-days to keep recent history.
 
-Active runs are never deleted for safety.
+Active runs are never deleted for safety. Runs with an explicit retention
+hold (set through the API or UI) are listed and skipped.
 
 Examples:
   dagu cleanup my-workflow                      # Delete all history (with confirmation)

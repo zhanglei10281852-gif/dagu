@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
@@ -219,18 +220,21 @@ func (r *DAGRunRepository) FindSubAttempt(ctx context.Context, root ir.DAGRunRef
 }
 
 // RemoveOldDAGRuns removes final DAG runs outside the configured retention policy.
+// Explicitly retention-locked runs are reported in DAGRunRemovalResult.Retained
+// and never removed, enqueued for asynchronous cleanup, or stripped of their
+// working directories.
 func (r *DAGRunRepository) RemoveOldDAGRuns(
 	ctx context.Context,
 	name string,
 	retentionDays int,
 	options DAGRunRetentionOptions,
-) ([]string, error) {
+) (DAGRunRemovalResult, error) {
 	request := DAGRunRetentionRequest{Name: name, DryRun: options.DryRun}
 	if options.RetentionRuns != nil {
 		if *options.RetentionRuns <= 0 {
 			logger.Warn(ctx, "Non-positive retentionRuns, no DAG runs will be removed",
 				slog.Int("retention-runs", *options.RetentionRuns))
-			return nil, nil
+			return DAGRunRemovalResult{}, nil
 		}
 		request.KeepRuns = *options.RetentionRuns
 		return r.removeOldDAGRuns(ctx, request)
@@ -242,57 +246,72 @@ func (r *DAGRunRepository) RemoveOldDAGRuns(
 	if retentionDays < 0 {
 		logger.Warn(ctx, "Negative retentionDays, no DAG runs will be removed",
 			slog.Int("retention-days", retentionDays))
-		return nil, nil
+		return DAGRunRemovalResult{}, nil
 	}
 	request.OlderThan = NewUTC(r.now().AddDate(0, 0, -retentionDays))
 	return r.removeOldDAGRuns(ctx, request)
 }
 
-func (r *DAGRunRepository) removeOldDAGRuns(ctx context.Context, request DAGRunRetentionRequest) ([]string, error) {
-	if !request.DryRun && r.removalEnqueuer != nil {
-		preview := request
-		preview.DryRun = true
-		refs, err := r.store.RemoveOldDAGRuns(ctx, preview)
-		if err != nil {
-			return nil, err
-		}
-		if err := r.enqueueDAGRunRemovals(ctx, refs); err != nil {
-			return nil, err
-		}
-		removed := make([]ir.DAGRunRef, 0, len(refs))
-		var removeErrs []error
-		for _, ref := range refs {
-			err := r.store.RemoveDAGRun(ctx, DAGRunRemoveRequest{DAGRun: ref, RejectActive: true})
-			if errors.Is(err, dagrun.ErrDAGRunIDNotFound) || errors.Is(err, dagrun.ErrDAGRunActive) {
-				continue
-			}
-			if err != nil {
-				removeErrs = append(removeErrs, err)
-				continue
-			}
-			removed = append(removed, ref)
-		}
-		return r.finishDAGRunRemovals(ctx, removed, errors.Join(removeErrs...))
+// removeOldDAGRuns first classifies candidates with a dry-run selection and
+// then removes each run through the same locked gate as a single delete, so a
+// retention hold landing between scan and delete is honored and asynchronous
+// cleanup cannot be scheduled ahead of it.
+func (r *DAGRunRepository) removeOldDAGRuns(ctx context.Context, request DAGRunRetentionRequest) (DAGRunRemovalResult, error) {
+	preview := request
+	preview.DryRun = true
+	selection, err := r.store.RemoveOldDAGRuns(ctx, preview)
+	if err != nil {
+		return DAGRunRemovalResult{}, err
 	}
-	refs, err := r.store.RemoveOldDAGRuns(ctx, request)
+
+	result := DAGRunRemovalResult{
+		Retained: dagRunRefIDs(selection.Retained),
+	}
 	if request.DryRun {
-		return dagRunRefIDs(refs), err
+		result.Removed = dagRunRefIDs(selection.Removable)
+		return result, nil
 	}
-	return r.finishDAGRunRemovals(ctx, refs, err)
+
+	var (
+		removedRefs []ir.DAGRunRef
+		removeErrs  []error
+	)
+	for _, ref := range selection.Removable {
+		err := r.removeDAGRunStore(ctx, ref, DAGRunRemoveOptions{RejectActive: true})
+		switch {
+		case err == nil:
+			removedRefs = append(removedRefs, ref)
+		case errors.Is(err, dagrun.ErrDAGRunRetentionLocked):
+			// The hold landed after the unlocked preview; classify it now.
+			result.Retained = append(result.Retained, ref.ID)
+		case errors.Is(err, dagrun.ErrDAGRunIDNotFound), errors.Is(err, dagrun.ErrDAGRunActive):
+			// The run disappeared or restarted between scan and removal.
+			continue
+		default:
+			removeErrs = append(removeErrs, err)
+		}
+	}
+
+	if err := r.removeWorkDirs(ctx, removedRefs); err != nil {
+		removeErrs = append(removeErrs, err)
+	}
+	result.Removed = dagRunRefIDs(removedRefs)
+	return result, errors.Join(removeErrs...)
 }
 
-func (r *DAGRunRepository) finishDAGRunRemovals(ctx context.Context, refs []ir.DAGRunRef, err error) ([]string, error) {
+func (r *DAGRunRepository) removeWorkDirs(ctx context.Context, refs []ir.DAGRunRef) error {
+	var errs []error
 	for _, ref := range refs {
 		workDirRef, normalizeErr := normalizeWorkDirRef(dagrun.WorkDirRef{DAGRun: ref})
 		if normalizeErr != nil {
-			err = errors.Join(err, normalizeErr)
+			errs = append(errs, normalizeErr)
 			continue
 		}
 		if removeErr := r.workDirs.Remove(ctx, workDirRef); removeErr != nil {
-			err = errors.Join(err, fmt.Errorf("remove work directory for dag-run %s: %w", ref.ID, removeErr))
+			errs = append(errs, fmt.Errorf("remove work directory for dag-run %s: %w", ref.ID, removeErr))
 		}
 	}
-	return dagRunRefIDs(refs), err
+	return errors.Join(errs...)
 }
 
 func dagRunRefIDs(refs []ir.DAGRunRef) []string {
@@ -308,27 +327,80 @@ func (r *DAGRunRepository) RemoveDAGRun(ctx context.Context, ref ir.DAGRunRef, o
 	if ref.ID == "" {
 		return dagrun.ErrDAGRunIDEmpty
 	}
-	if r.removalEnqueuer != nil {
-		if err := r.enqueueDAGRunRemovals(ctx, []ir.DAGRunRef{ref}); err != nil {
+	if err := r.removeDAGRunStore(ctx, ref, options); err != nil {
+		if !errors.Is(err, dagrun.ErrDAGRunIDNotFound) {
 			return err
 		}
+		// Preserve the historical tolerance for already-missing runs while
+		// still removing a materialized work directory.
+		if err := r.removeWorkDir(ctx, ref); err != nil {
+			return err
+		}
+		return nil
 	}
-	err := r.store.RemoveDAGRun(ctx, DAGRunRemoveRequest{
-		DAGRun:       ref,
-		RejectActive: options.RejectActive,
-	})
-	if err != nil && !errors.Is(err, dagrun.ErrDAGRunIDNotFound) {
+	return r.removeWorkDir(ctx, ref)
+}
+
+// removeWorkDir removes the materialized per-run working directory.
+func (r *DAGRunRepository) removeWorkDir(ctx context.Context, ref ir.DAGRunRef) error {
+	workDirRef, err := normalizeWorkDirRef(dagrun.WorkDirRef{DAGRun: ref})
+	if err != nil {
 		return err
 	}
-	workDirRef, normalizeErr := normalizeWorkDirRef(dagrun.WorkDirRef{DAGRun: ref})
-	if normalizeErr != nil {
-		return errors.Join(err, normalizeErr)
+	if removeErr := r.workDirs.Remove(ctx, workDirRef); removeErr != nil {
+		return fmt.Errorf("remove work directory for dag-run %s: %w", ref.ID, removeErr)
 	}
-	removeErr := r.workDirs.Remove(ctx, workDirRef)
-	if removeErr != nil {
-		removeErr = fmt.Errorf("remove work directory for dag-run %s: %w", ref.ID, removeErr)
+	return nil
+}
+
+// removeDAGRunStore performs the locked store removal. Agent-session cleanup
+// jobs are scheduled from the before-commit hook, which the file store invokes
+// inside the root ownership lock after every gate passed: a concurrent
+// retention set can neither lose to this delete nor be followed by cleanup
+// scheduled before the lock.
+func (r *DAGRunRepository) removeDAGRunStore(ctx context.Context, ref ir.DAGRunRef, options DAGRunRemoveOptions) error {
+	req := DAGRunRemoveRequest{
+		DAGRun:       ref,
+		RejectActive: options.RejectActive,
 	}
-	return errors.Join(err, removeErr)
+	if r.removalEnqueuer != nil {
+		req.BeforeCommit = func(hookCtx context.Context) error {
+			return r.enqueueDAGRunRemovals(hookCtx, []ir.DAGRunRef{ref})
+		}
+	}
+	return r.store.RemoveDAGRun(ctx, req)
+}
+
+// GetRetentionLock returns the explicit retention hold on a finished root DAG
+// run, or (nil, nil) when the run is not held.
+func (r *DAGRunRepository) GetRetentionLock(ctx context.Context, ref ir.DAGRunRef) (*RetentionLock, error) {
+	if ref.ID == "" {
+		return nil, dagrun.ErrDAGRunIDEmpty
+	}
+	return r.store.GetRetentionLock(ctx, ref)
+}
+
+// SetRetentionLock places an idempotent retention hold on a finished root DAG
+// run. Repeated calls return the existing hold unchanged. Only terminal root
+// runs can be held; the store rejects active and child runs.
+func (r *DAGRunRepository) SetRetentionLock(ctx context.Context, ref ir.DAGRunRef, input DAGRunRetentionLockInput) (*RetentionLock, error) {
+	if ref.ID == "" {
+		return nil, dagrun.ErrDAGRunIDEmpty
+	}
+	return r.store.SetRetentionLock(ctx, DAGRunSetRetentionLockRequest{
+		DAGRun:   ref,
+		LockedBy: strings.TrimSpace(input.LockedBy),
+		Reason:   strings.TrimSpace(input.Reason),
+	})
+}
+
+// ReleaseRetentionLock removes a retention hold. Releasing an unheld run
+// succeeds, so the run returns to its DAG's normal history policy.
+func (r *DAGRunRepository) ReleaseRetentionLock(ctx context.Context, ref ir.DAGRunRef) error {
+	if ref.ID == "" {
+		return dagrun.ErrDAGRunIDEmpty
+	}
+	return r.store.ReleaseRetentionLock(ctx, ref)
 }
 
 // PruneArtifacts removes artifact directories and index records that no

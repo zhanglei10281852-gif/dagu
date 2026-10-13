@@ -23,6 +23,7 @@ import RelativeTime from '@/components/ui/relative-time';
 import StatusChip from '@/components/ui/status-chip';
 import AutoRetryBadge from '../common/AutoRetryBadge';
 import { DAGRunActions } from '../common';
+import DAGRunRetentionControl from './DAGRunRetentionControl';
 import { buildDAGPageURL, buildDAGRunPageURL } from '../../lib/dagRunUrls';
 import { I18nText } from '@/i18n/I18nText';
 import { I18nProps } from '@/i18n/I18nProps';
@@ -301,6 +302,7 @@ const DAGRunHeader: React.FC<DAGRunHeaderProps> = ({
               displayMode="compact"
               isRootLevel={dagRun.rootDAGRunId === dagRun.dagRunId}
             />
+            <DAGRunRetentionControl dagRun={dagRun} refresh={refreshFn} />
           </div>
 
           {/* Metadata items */}

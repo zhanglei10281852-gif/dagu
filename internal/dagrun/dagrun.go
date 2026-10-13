@@ -15,4 +15,14 @@ var (
 	ErrDAGRunActive        = errors.New("dag-run is active")
 	ErrNoStatusData        = errors.New("no status data")
 	ErrCorruptedStatusData = errors.New("corrupted status data")
+
+	// ErrDAGRunRetentionLocked indicates a finished root run carries an
+	// explicit retention hold and must not be removed.
+	ErrDAGRunRetentionLocked = errors.New("dag-run is retention locked")
+	// ErrDAGRunRetentionUnreadable indicates the retention state could not be
+	// read; callers must treat such a run as non-removable.
+	ErrDAGRunRetentionUnreadable = errors.New("dag-run retention state is unreadable")
+	// ErrDAGRunNotRoot indicates retention was requested for a child run,
+	// while only root runs may be retention objects.
+	ErrDAGRunNotRoot = errors.New("dag-run is not a root run")
 )

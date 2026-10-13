@@ -1,0 +1,5 @@
+ok  	github.com/dagucloud/dagu/v2/internal/persis/file/dagrun	56.851s
+ok  	github.com/dagucloud/dagu/v2/internal/persis	9.804s
+ok  	github.com/dagucloud/dagu/v2/internal/cmd	17.858s
+ok  	github.com/dagucloud/dagu/v2/internal/service/frontend/api/v1	19.210s
+ok  	github.com/dagucloud/dagu/v2/internal/persis/file/dagrun	13.732s

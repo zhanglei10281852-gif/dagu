@@ -219,9 +219,9 @@ func (s *recordingRunStateBackend) FindSubAttempt(context.Context, ir.DAGRunRef,
 	return s.subAttempt, nil
 }
 
-func (s *recordingRunStateBackend) RemoveOldDAGRuns(_ context.Context, req persis.DAGRunRetentionRequest) ([]ir.DAGRunRef, error) {
+func (s *recordingRunStateBackend) RemoveOldDAGRuns(_ context.Context, req persis.DAGRunRetentionRequest) (persis.DAGRunRetentionSelection, error) {
 	s.removeOldCalls = append(s.removeOldCalls, req)
-	return nil, s.removeOldErr
+	return persis.DAGRunRetentionSelection{}, s.removeOldErr
 }
 
 var runStateStoreNow = time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)

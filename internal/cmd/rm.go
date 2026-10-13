@@ -138,18 +138,19 @@ func executeRm(ctx *Context, opts rmOptions) error {
 	}
 
 	if opts.deleteHist {
-		runIDs, err := removeHistory(ctx, opts)
+		result, err := removeHistory(ctx, opts)
 		if err != nil {
 			return err
 		}
 		if !ctx.Quiet {
-			if len(runIDs) == 0 {
+			if len(result.Removed) == 0 {
 				fmt.Printf("No runs to delete for DAG %q\n", opts.dagName)
 			} else {
-				fmt.Printf("Successfully removed %d run(s) for DAG %q\n", len(runIDs), opts.dagName)
+				fmt.Printf("Successfully removed %d run(s) for DAG %q\n", len(result.Removed), opts.dagName)
 			}
+			printRetainedRuns(result.Retained)
 		}
-		if removesReplayCaches(opts) {
+		if removesReplayCaches(opts) && len(result.Retained) == 0 {
 			for _, cache := range replayCaches(ctx) {
 				steps, err := cache.store.Clear(opts.dagName, "")
 				if err != nil {
@@ -208,21 +209,24 @@ func previewRm(ctx *Context, opts rmOptions) error {
 		return nil
 	}
 
-	runIDs, err := removeHistory(ctx, opts)
+	result, err := removeHistory(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("failed to check history for %q: %w", opts.dagName, err)
 	}
 
-	if len(runIDs) == 0 {
+	if len(result.Removed) == 0 && len(result.Retained) == 0 {
 		fmt.Printf("Dry run: No runs to delete for DAG %q\n", opts.dagName)
 	} else {
-		fmt.Printf("Dry run: Would delete %d run(s) for DAG %q:\n", len(runIDs), opts.dagName)
-		for _, runID := range runIDs {
-			fmt.Printf("  - %s\n", runID)
+		if len(result.Removed) > 0 {
+			fmt.Printf("Dry run: Would delete %d run(s) for DAG %q:\n", len(result.Removed), opts.dagName)
+			for _, runID := range result.Removed {
+				fmt.Printf("  - %s\n", runID)
+			}
 		}
+		printRetainedRuns(result.Retained)
 	}
 
-	if removesReplayCaches(opts) {
+	if removesReplayCaches(opts) && len(result.Retained) == 0 {
 		for _, cache := range replayCaches(ctx) {
 			steps, err := cache.store.Steps(opts.dagName)
 			if err != nil {
@@ -240,6 +244,19 @@ func previewRm(ctx *Context, opts rmOptions) error {
 	return nil
 }
 
+// printRetainedRuns lists runs skipped because they carry an explicit
+// retention hold. Both dry runs and actual removals use the same wording so an
+// investigator can distinguish deleted and protected items.
+func printRetainedRuns(runIDs []string) {
+	if len(runIDs) == 0 {
+		return
+	}
+	fmt.Printf("Skipping %d retention-locked run(s):\n", len(runIDs))
+	for _, runID := range runIDs {
+		fmt.Printf("  - %s\n", runID)
+	}
+}
+
 // removesReplayCaches reports whether the command deletes all of the DAG's
 // history, which also clears the replay caches of its browser and computer
 // steps. A nil retention (rm) and a retention of zero days (cleanup's
@@ -250,7 +267,7 @@ func removesReplayCaches(opts rmOptions) bool {
 	return opts.deleteHist && opts.olderThan == "" && allHistory
 }
 
-func removeHistory(ctx *Context, opts rmOptions) ([]string, error) {
+func removeHistory(ctx *Context, opts rmOptions) (persis.DAGRunRemovalResult, error) {
 	retentionDays := 0
 	var removeOptions persis.DAGRunRetentionOptions
 	if opts.dryRun {
@@ -263,17 +280,17 @@ func removeHistory(ctx *Context, opts rmOptions) ([]string, error) {
 	case opts.olderThan != "":
 		dur, err := parseRelativeDuration(opts.olderThan)
 		if err != nil {
-			return nil, fmt.Errorf("invalid --older-than value %q: %w. Valid formats: 7d, 24h, 1w", opts.olderThan, err)
+			return persis.DAGRunRemovalResult{}, fmt.Errorf("invalid --older-than value %q: %w. Valid formats: 7d, 24h, 1w", opts.olderThan, err)
 		}
 		cutoff := time.Now().UTC().Add(-dur)
 		removeOptions.OlderThan = &cutoff
 	}
 
-	runIDs, err := ctx.Persistence.DAGRunRepository.RemoveOldDAGRuns(ctx, opts.dagName, retentionDays, removeOptions)
+	result, err := ctx.Persistence.DAGRunRepository.RemoveOldDAGRuns(ctx, opts.dagName, retentionDays, removeOptions)
 	if err != nil {
-		return nil, fmt.Errorf("failed to remove history for %q: %w", opts.dagName, err)
+		return persis.DAGRunRemovalResult{}, fmt.Errorf("failed to remove history for %q: %w", opts.dagName, err)
 	}
-	return runIDs, nil
+	return result, nil
 }
 
 func ensureNoActiveRuns(ctx *Context, dagName string) error {

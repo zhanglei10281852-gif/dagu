@@ -1,0 +1,47 @@
+{
+  "id": "dagucloud-dagu-21869210-a5ca-47c4-93f2-5f9f92d52ece",
+  "syncRevision": 5,
+  "completionStatus": "完成",
+  "collectionDecision": "收录：长程题",
+  "reality": "事故调查人员需要在自动 retention、批量 cleanup 或显式删除前保留一条终态 root run 及其完整资源树，解除后再恢复原清理策略。工程难点在于让保留状态与天数/次数选择、REST 和 CLI 删除、agent session 清理登记、日志、工件、子运行和工作目录删除共同服从同一 DataRoot 所有权边界，并在读取失败、写入失败和并发删除时保持 fail closed。",
+  "artifactResult": "1 通过\n2 通过\n3 通过\n4 通过\n5 通过\n6 通过\n7 通过",
+  "runResult": "1 通过\n2 通过\n3 通过\n4 通过\n5 通过\n6 通过\n7 通过",
+  "rubricResults": [
+    {
+      "id": 1,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 2,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 3,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 4,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 5,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 6,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 7,
+      "passed": true,
+      "reason": ""
+    }
+  ],
+  "artifactMaterials": "同一 Trae 会话的原始轨迹、登记基线差异、严格 YAML 判分清单、逐条代码审计报告和唯一截图均已核验。运行持久化与持久化总包的无缓存验证通过；前端接口广泛验证在 516.373 秒后结束并记录失败。保留、选择、删除和清理登记共享 root 所有权边界，清理消费端在运行记录仍存在时释放任务且不删除 provider 资源。"
+}

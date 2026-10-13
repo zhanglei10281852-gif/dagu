@@ -416,9 +416,10 @@ func TestRepository(t *testing.T) {
 
 		// Remove attempts older than 0 days
 		// It should remove all attempts
-		removedIDs, err := th.Repository.RemoveOldDAGRuns(th.Context, "test_DAG", 0, persis.DAGRunRetentionOptions{})
+		removed, err := th.Repository.RemoveOldDAGRuns(th.Context, "test_DAG", 0, persis.DAGRunRetentionOptions{})
 		require.NoError(t, err)
-		assert.Len(t, removedIDs, 2) // 2 non-active runs should be removed
+		assert.Len(t, removed.Removed, 2) // 2 non-active runs should be removed
+		assert.Empty(t, removed.Retained)
 
 		// Verify non active attempts are removed
 		statuses, err = th.Repository.RecentStatuses(th.Context, "test_DAG", 3)
@@ -445,14 +446,15 @@ func TestRepository(t *testing.T) {
 		require.NoError(t, os.Chtimes(oldAttempt.file, tsOld, tsOld))
 		require.NoError(t, os.Chtimes(recentAttempt.file, tsRecent, tsRecent))
 
-		removedIDs, err := th.Repository.RemoveOldDAGRuns(
+		removed, err := th.Repository.RemoveOldDAGRuns(
 			th.Context,
 			"test_DAG",
 			30, // ignored when OlderThan is set
 			persis.DAGRunRetentionOptions{OlderThan: &cutoff},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, []string{"old-run"}, removedIDs)
+		assert.Equal(t, []string{"old-run"}, removed.Removed)
+		assert.Empty(t, removed.Retained)
 
 		statuses, err := th.Repository.RecentStatuses(th.Context, "test_DAG", 3)
 		require.NoError(t, err)
@@ -465,14 +467,15 @@ func TestRepository(t *testing.T) {
 		th.CreateAttempt(t, time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC), "completed-run", ir.Succeeded)
 
 		zeroCutoff := time.Time{}
-		removedIDs, err := th.Repository.RemoveOldDAGRuns(
+		removed, err := th.Repository.RemoveOldDAGRuns(
 			th.Context,
 			"test_DAG",
 			30,
 			persis.DAGRunRetentionOptions{OlderThan: &zeroCutoff},
 		)
 		require.NoError(t, err)
-		assert.Empty(t, removedIDs)
+		assert.Empty(t, removed.Removed)
+		assert.Empty(t, removed.Retained)
 
 		statuses, err := th.Repository.RecentStatuses(th.Context, "test_DAG", 1)
 		require.NoError(t, err)

@@ -2428,6 +2428,27 @@ const english = {
   "Plan": "Plan",
   "Expires": "Expires",
   "License deactivated. Running in community mode.": "License deactivated. Running in community mode.",
+  "Retained": "Retained",
+  "Retain as evidence": "Retain as evidence",
+  "Release retention": "Release retention",
+  "Retain DAG run as evidence": "Retain DAG run as evidence",
+  "The run, its attempts, child runs, logs, artifacts, and working directory will be exempt from history cleanup and deletion until the hold is released.":
+    "The run, its attempts, child runs, logs, artifacts, and working directory will be exempt from history cleanup and deletion until the hold is released.",
+  "Reason (optional)": "Reason (optional)",
+  "For example: incident investigation, audit hold": "For example: incident investigation, audit hold",
+  "Retain run": "Retain run",
+  "Release retention hold": "Release retention hold",
+  "The DAG run will follow the normal history retention policy again and may be removed by cleanup.":
+    "The DAG run will follow the normal history retention policy again and may be removed by cleanup.",
+  "Release hold": "Release hold",
+  "Retained by {name}": "Retained by {name}",
+  "DAG run retained as evidence": "DAG run retained as evidence",
+  "Retention hold released": "Retention hold released",
+  "Failed to place the retention hold": "Failed to place the retention hold",
+  "Failed to release the retention hold": "Failed to release the retention hold",
+  "Only finished root DAG-runs can be retained. Check the server logs for details.":
+    "Only finished root DAG-runs can be retained. Check the server logs for details.",
+  "The DAG run remains retained as evidence.": "The DAG run remains retained as evidence.",
 } as const;
 
 export type StaticMessage = keyof typeof english;
@@ -4798,6 +4819,27 @@ const chinese = {
   "Plan": "套餐",
   "Expires": "到期日",
   "License deactivated. Running in community mode.": "许可证已停用。正在以社区版模式运行。",
+  "Retained": "已保留",
+  "Retain as evidence": "作为证据保留",
+  "Release retention": "解除保留",
+  "Retain DAG run as evidence": "将该 DAG 运行作为证据保留",
+  "The run, its attempts, child runs, logs, artifacts, and working directory will be exempt from history cleanup and deletion until the hold is released.":
+    "解除保留前，该运行及其尝试、子运行、日志、工件和工作目录不会被历史清理或删除。",
+  "Reason (optional)": "原因（可选）",
+  "For example: incident investigation, audit hold": "例如：事故调查、审计留存",
+  "Retain run": "保留运行",
+  "Release retention hold": "解除保留锁定",
+  "The DAG run will follow the normal history retention policy again and may be removed by cleanup.":
+    "该 DAG 运行将重新适用常规历史保留策略，可能会被清理。",
+  "Release hold": "解除锁定",
+  "Retained by {name}": "保留人：{name}",
+  "DAG run retained as evidence": "DAG 运行已作为证据保留",
+  "Retention hold released": "保留锁定已解除",
+  "Failed to place the retention hold": "设置保留锁定失败",
+  "Failed to release the retention hold": "解除保留锁定失败",
+  "Only finished root DAG-runs can be retained. Check the server logs for details.":
+    "只有已结束的根 DAG 运行可以保留。详情请查看服务器日志。",
+  "The DAG run remains retained as evidence.": "该 DAG 运行仍作为证据保留。",
 } as const satisfies Record<StaticMessage, string>;
 
 const japanese = {
@@ -7250,6 +7292,27 @@ const japanese = {
   "Plan": "プラン",
   "Expires": "有効期限",
   "License deactivated. Running in community mode.": "ライセンスを無効化しました。コミュニティモードで動作しています。",
+  "Retained": "保持中",
+  "Retain as evidence": "証拠として保持",
+  "Release retention": "保持を解除",
+  "Retain DAG run as evidence": "DAG実行を証拠として保持",
+  "The run, its attempts, child runs, logs, artifacts, and working directory will be exempt from history cleanup and deletion until the hold is released.":
+    "保持を解除するまで、この実行とその試行・子実行・ログ・成果物・作業ディレクトリは履歴クリーンアップと削除の対象外になります。",
+  "Reason (optional)": "理由（任意）",
+  "For example: incident investigation, audit hold": "例：インシデント調査、監査のための保持",
+  "Retain run": "実行を保持",
+  "Release retention hold": "保持ロックを解除",
+  "The DAG run will follow the normal history retention policy again and may be removed by cleanup.":
+    "このDAG実行は通常の履歴保持ポリシーに従い、クリーンアップで削除される可能性があります。",
+  "Release hold": "ロックを解除",
+  "Retained by {name}": "保持者：{name}",
+  "DAG run retained as evidence": "DAG実行を証拠として保持しました",
+  "Retention hold released": "保持ロックを解除しました",
+  "Failed to place the retention hold": "保持ロックの設定に失敗しました",
+  "Failed to release the retention hold": "保持ロックの解除に失敗しました",
+  "Only finished root DAG-runs can be retained. Check the server logs for details.":
+    "保持できるのは完了したルートDAG実行のみです。詳細はサーバーログを確認してください。",
+  "The DAG run remains retained as evidence.": "このDAG実行は引き続き証拠として保持されます。",
 } as const satisfies Record<StaticMessage, string>;
 
 export const staticMessages = {

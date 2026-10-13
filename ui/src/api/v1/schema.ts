@@ -802,9 +802,33 @@ export interface paths {
         post?: never;
         /**
          * Delete a DAG-run
-         * @description Permanently removes a DAG-run record and its associated run data. Developer, manager, or admin only.
+         * @description Permanently removes a DAG-run record and its associated run data. Developer, manager, or admin only. A run carrying an explicit retention hold is refused with 409 until the hold is released.
          */
         delete: operations["deleteDAGRun"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dag-runs/{name}/{dagRunId}/retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Place a retention hold on a finished root DAG-run
+         * @description Preserves one finished root DAG-run as evidence without changing the DAG's history retention policy. Developer, manager, or admin only. The 'latest' alias, active runs, and child (sub) DAG-runs cannot be held. Repeated puts are idempotent and return the existing hold unchanged. While held, retention cleanup, rm/cleanup, single and batch deletion skip the run and all of its attempts, child runs, logs, artifacts, indexes, working directory, and registered Dagu-owned agent-session resources.
+         */
+        put: operations["putDAGRunRetentionLock"];
+        post?: never;
+        /**
+         * Release the retention hold on a DAG-run
+         * @description Releases the evidence retention hold so the run follows the DAG's normal history policy again. Developer, manager, or admin only. Repeated deletes are idempotent and succeed when no hold is present.
+         */
+        delete: operations["deleteDAGRunRetentionLock"];
         options?: never;
         head?: never;
         patch?: never;
@@ -5700,6 +5724,22 @@ export interface components {
             humanTaskResumePending?: boolean;
             /** @description Whether a root run has a saved approval and ready work whose resume still needs to be accepted */
             approvalResumePending?: boolean;
+            /** @description Evidence retention hold on this root DAG-run; absent when the run is not held. Only terminal root runs can carry a hold. */
+            retention?: components["schemas"]["DAGRunRetention"] | null;
+        };
+        /** @description Evidence retention hold placed on a finished root DAG-run. The hold is independent of the DAG's history retention policy. While present, the run and all of its attempts, child runs, logs, artifacts, indexes, working directory, and registered Dagu-owned agent-session resources are exempt from day/count retention, 'rm'/'cleanup', single and batch deletion. Repeated put and delete requests are idempotent. */
+        DAGRunRetention: {
+            /** @description Authenticated operator that placed the hold; empty when attribution is unavailable */
+            lockedBy: string;
+            /** @description RFC 3339 UTC timestamp when the hold was placed */
+            lockedAt: string;
+            /** @description Optional reason recorded for preserving the run as evidence */
+            reason?: string;
+        };
+        /** @description Body for placing an evidence retention hold on a terminal root DAG-run. */
+        DAGRunRetentionLockRequest: {
+            /** @description Optional reason for preserving this run as evidence */
+            reason?: string;
         };
         /** @description One file within a DAG-run's artifact directory */
         ArtifactListFile: {
@@ -10305,6 +10345,136 @@ export interface operations {
                 content?: never;
             };
             /** @description DAG-run cannot be deleted */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description DAG-run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description DAG-run carries an explicit retention hold or its retention state cannot be read */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    putDAGRunRetentionLock: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run; must not be the special 'latest' alias */
+                dagRunId: components["parameters"]["DAGRunConcreteId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["DAGRunRetentionLockRequest"];
+            };
+        };
+        responses: {
+            /** @description The retention hold on the DAG-run */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DAGRunRetention"];
+                };
+            };
+            /** @description Malformed request, such as using the 'latest' alias */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description DAG-run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description DAG-run is active or its retention state cannot be read */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    deleteDAGRunRetentionLock: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run; must not be the special 'latest' alias */
+                dagRunId: components["parameters"]["DAGRunConcreteId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Retention hold released (or already absent) */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Malformed request, such as using the 'latest' alias */
             400: {
                 headers: {
                     [name: string]: unknown;

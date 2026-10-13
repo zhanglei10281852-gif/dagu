@@ -2207,6 +2207,18 @@ func (a *API) DeleteDAGRun(ctx context.Context, request api.DeleteDAGRunRequestO
 				Message: fmt.Sprintf("DAG run %s is %s; stop or dequeue it before deleting", request.DagRunId, status),
 			}, nil
 		}
+		if errors.Is(err, dagrun.ErrDAGRunRetentionLocked) {
+			return api.DeleteDAGRun409JSONResponse{
+				Code:    api.ErrorCodeConflict,
+				Message: fmt.Sprintf("DAG run %s is retained as evidence; release its retention lock before deleting", request.DagRunId),
+			}, nil
+		}
+		if errors.Is(err, dagrun.ErrDAGRunRetentionUnreadable) {
+			return api.DeleteDAGRun409JSONResponse{
+				Code:    api.ErrorCodeConflict,
+				Message: fmt.Sprintf("DAG run %s cannot be deleted while its retention state is unreadable", request.DagRunId),
+			}, nil
+		}
 		return nil, fmt.Errorf("error deleting DAG run: %w", err)
 	}
 
@@ -2216,6 +2228,135 @@ func (a *API) DeleteDAGRun(ctx context.Context, request api.DeleteDAGRunRequestO
 	})
 
 	return api.DeleteDAGRun204Response{}, nil
+}
+
+const maxDAGRunRetentionReasonRunes = 1000
+
+// PutDAGRunRetentionLock implements api.StrictServerInterface.
+func (a *API) PutDAGRunRetentionLock(ctx context.Context, request api.PutDAGRunRetentionLockRequestObject) (api.PutDAGRunRetentionLockResponseObject, error) {
+	if request.DagRunId == "latest" {
+		return &api.PutDAGRunRetentionLock400JSONResponse{
+			Code:    api.ErrorCodeBadRequest,
+			Message: "latest cannot be used for retention; select a concrete finished dag-run ID",
+		}, nil
+	}
+
+	reason := ""
+	if request.Body != nil && request.Body.Reason != nil {
+		reason = strings.TrimSpace(*request.Body.Reason)
+	}
+	if len([]rune(reason)) > maxDAGRunRetentionReasonRunes {
+		return &api.PutDAGRunRetentionLock400JSONResponse{
+			Code:    api.ErrorCodeBadRequest,
+			Message: fmt.Sprintf("retention reason must not exceed %d characters", maxDAGRunRetentionReasonRunes),
+		}, nil
+	}
+
+	ref := ir.NewDAGRunRef(request.Name, request.DagRunId)
+	workspaceName, err := a.workspaceNameForDAGRun(ctx, ref)
+	if err != nil {
+		if isDAGRunLookupNotFound(err) {
+			return &api.PutDAGRunRetentionLock404JSONResponse{
+				Code:    api.ErrorCodeNotFound,
+				Message: fmt.Sprintf("DAG run %s not found", request.DagRunId),
+			}, nil
+		}
+		return nil, fmt.Errorf("resolve DAG run workspace before retention: %w", err)
+	}
+	if err := a.requireDAGWriteForWorkspace(ctx, workspaceName); err != nil {
+		return nil, err
+	}
+
+	lock, err := a.dagRunRepository.SetRetentionLock(ctx, ref, persis.DAGRunRetentionLockInput{
+		LockedBy: triggerActorFromContext(ctx),
+		Reason:   reason,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, dagrun.ErrDAGRunIDNotFound) || errors.Is(err, dagrun.ErrNoStatusData):
+			return &api.PutDAGRunRetentionLock404JSONResponse{
+				Code:    api.ErrorCodeNotFound,
+				Message: fmt.Sprintf("DAG run %s not found", request.DagRunId),
+			}, nil
+		case errors.Is(err, dagrun.ErrDAGRunActive):
+			return &api.PutDAGRunRetentionLock409JSONResponse{
+				Code:    api.ErrorCodeConflict,
+				Message: fmt.Sprintf("DAG run %s is active; only finished root runs can be retained", request.DagRunId),
+			}, nil
+		case errors.Is(err, dagrun.ErrDAGRunNotRoot):
+			return &api.PutDAGRunRetentionLock400JSONResponse{
+				Code:    api.ErrorCodeBadRequest,
+				Message: fmt.Sprintf("DAG run %s is a child run; retention can only be placed on a root run", request.DagRunId),
+			}, nil
+		case errors.Is(err, dagrun.ErrDAGRunRetentionUnreadable):
+			return &api.PutDAGRunRetentionLock409JSONResponse{
+				Code:    api.ErrorCodeConflict,
+				Message: fmt.Sprintf("DAG run %s retention state is unreadable; refusing to change it", request.DagRunId),
+			}, nil
+		default:
+			return nil, fmt.Errorf("error placing retention lock on DAG run: %w", err)
+		}
+	}
+
+	a.logAudit(ctx, audit.CategoryDAG, "dag_run_retention_lock", map[string]any{
+		"dag_name":   request.Name,
+		"dag_run_id": request.DagRunId,
+		"reason":     reason,
+	})
+
+	var reasonPtr *string
+	if lock.Reason != "" {
+		reasonPtr = ptrOf(lock.Reason)
+	}
+	return &api.PutDAGRunRetentionLock200JSONResponse{
+		LockedAt: lock.LockedAt.UTC().Format(time.RFC3339),
+		LockedBy: lock.LockedBy,
+		Reason:   reasonPtr,
+	}, nil
+}
+
+// DeleteDAGRunRetentionLock implements api.StrictServerInterface.
+func (a *API) DeleteDAGRunRetentionLock(ctx context.Context, request api.DeleteDAGRunRetentionLockRequestObject) (api.DeleteDAGRunRetentionLockResponseObject, error) {
+	if request.DagRunId == "latest" {
+		return api.DeleteDAGRunRetentionLock400JSONResponse{
+			Code:    api.ErrorCodeBadRequest,
+			Message: "latest cannot be used for retention; select a concrete finished dag-run ID",
+		}, nil
+	}
+
+	ref := ir.NewDAGRunRef(request.Name, request.DagRunId)
+	workspaceName, err := a.workspaceNameForDAGRun(ctx, ref)
+	if err != nil {
+		if isDAGRunLookupNotFound(err) {
+			return api.DeleteDAGRunRetentionLock404JSONResponse{
+				Code:    api.ErrorCodeNotFound,
+				Message: fmt.Sprintf("DAG run %s not found", request.DagRunId),
+			}, nil
+		}
+		return nil, fmt.Errorf("resolve DAG run workspace before retention release: %w", err)
+	}
+	if err := a.requireDAGWriteForWorkspace(ctx, workspaceName); err != nil {
+		return nil, err
+	}
+
+	if err := a.dagRunRepository.ReleaseRetentionLock(ctx, ref); err != nil {
+		switch {
+		case errors.Is(err, dagrun.ErrDAGRunIDNotFound) || errors.Is(err, dagrun.ErrNoStatusData):
+			return api.DeleteDAGRunRetentionLock404JSONResponse{
+				Code:    api.ErrorCodeNotFound,
+				Message: fmt.Sprintf("DAG run %s not found", request.DagRunId),
+			}, nil
+		default:
+			return nil, fmt.Errorf("error releasing retention lock on DAG run: %w", err)
+		}
+	}
+
+	a.logAudit(ctx, audit.CategoryDAG, "dag_run_retention_unlock", map[string]any{
+		"dag_name":   request.Name,
+		"dag_run_id": request.DagRunId,
+	})
+
+	return api.DeleteDAGRunRetentionLock204Response{}, nil
 }
 
 func isDAGRunLookupNotFound(err error) bool {
@@ -2228,9 +2369,36 @@ func (a *API) getDAGRunDetailsData(ctx context.Context, dagName, dagRunId string
 	if err != nil {
 		return api.GetDAGRunDetails200JSONResponse{}, err
 	}
+	details := a.toDAGRunDetailsWithSpecSource(ctx, attempt, *dagStatus)
+	details.Retention = a.dagRunRetentionResponse(ctx, ir.NewDAGRunRef(dagName, dagStatus.DAGRunID))
 	return api.GetDAGRunDetails200JSONResponse{
-		DagRunDetails: a.toDAGRunDetailsWithSpecSource(ctx, attempt, *dagStatus),
+		DagRunDetails: details,
 	}, nil
+}
+
+// dagRunRetentionResponse returns the API representation of the run's
+// retention hold. A missing hold returns nil. A hold that cannot be read is
+// omitted from the response while deletion still fails closed at the store.
+func (a *API) dagRunRetentionResponse(ctx context.Context, ref ir.DAGRunRef) *api.DAGRunRetention {
+	lock, err := a.dagRunRepository.GetRetentionLock(ctx, ref)
+	if err != nil {
+		if !errors.Is(err, dagrun.ErrDAGRunIDNotFound) && !errors.Is(err, dagrun.ErrNoStatusData) {
+			logger.Warn(ctx, "Failed to read DAG-run retention state",
+				tag.DAG(ref.Name), tag.RunID(ref.ID), tag.Error(err))
+		}
+		return nil
+	}
+	if lock == nil {
+		return nil
+	}
+	resp := &api.DAGRunRetention{
+		LockedAt: lock.LockedAt.UTC().Format(time.RFC3339),
+		LockedBy: lock.LockedBy,
+	}
+	if lock.Reason != "" {
+		resp.Reason = ptrOf(lock.Reason)
+	}
+	return resp
 }
 
 func (a *API) loadRootDAGRunDetailsAttemptAndStatus(

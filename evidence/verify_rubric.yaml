@@ -1,0 +1,22 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: "有权限的用户可对具体终态 root run 幂等设置/解除保留并读取操作人、时间和原因；状态跨进程与重启保持，latest、活动运行和 child run 被稳定拒绝。"
+  - id: 2
+    type: f2p
+    text: "按天数和按次数的自动 retention 都跳过保留运行，同时继续按原顺序和阈值清理其他符合条件的未保留运行。"
+  - id: 3
+    type: f2p
+    text: "dagu rm/cleanup 的 dry-run 明确报告保留跳过项，实际批量清理不删除它；单次 REST/UI 删除返回确定冲突且不会先排入任何资源清理。"
+  - id: 4
+    type: f2p
+    text: "设置保留与已开始的 retention 选择或显式删除并发时，共享的 root 所有权边界保证保留成功后不会继续删除、留下半删除树或登记迟到清理。"
+  - id: 5
+    type: f2p
+    text: "保留状态读取失败时所有删除入口对该运行 fail closed，写入失败保持先前状态；存储恢复后操作可重试且不损坏其他运行。"
+  - id: 6
+    type: f2p
+    text: "被保留 root 的 attempts、child runs、日志、工件和索引、每次运行工作目录及 Dagu-owned agent session 清理记录保持完整，解除后原策略可完整删除这些资源。"
+  - id: 7
+    type: p2p
+    text: "未保留运行的自动与显式删除、活动运行保护、天数/次数保留、工件存活判断、权限、审计和普通 dry-run 行为不回归。"

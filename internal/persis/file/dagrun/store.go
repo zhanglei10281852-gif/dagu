@@ -450,22 +450,31 @@ func (store *Store) FindSubAttempt(ctx context.Context, ref ir.DAGRunRef, subDAG
 }
 
 // RemoveOldDAGRuns removes final runs outside a normalized retention policy.
-func (store *Store) RemoveOldDAGRuns(ctx context.Context, req persis.DAGRunRetentionRequest) ([]ir.DAGRunRef, error) {
+func (store *Store) RemoveOldDAGRuns(ctx context.Context, req persis.DAGRunRetentionRequest) (persis.DAGRunRetentionSelection, error) {
 	root := store.dataRoot(req.Name)
 	var (
-		ids []string
-		err error
+		removed  []string
+		retained []string
+		err      error
 	)
 	if req.KeepRuns > 0 {
-		ids, err = root.RemoveOldByRuns(ctx, req.KeepRuns, req.DryRun)
+		removed, retained, err = root.RemoveOldByRuns(ctx, req.KeepRuns, req.DryRun)
 	} else {
-		ids, err = root.removeOldBefore(ctx, req.OlderThan, req.DryRun)
+		removed, retained, err = root.removeOldBefore(ctx, req.OlderThan, req.DryRun)
 	}
+	selection := persis.DAGRunRetentionSelection{
+		Removable: refsForRunIDs(req.Name, removed),
+		Retained:  refsForRunIDs(req.Name, retained),
+	}
+	return selection, err
+}
+
+func refsForRunIDs(name string, ids []string) []ir.DAGRunRef {
 	refs := make([]ir.DAGRunRef, 0, len(ids))
 	for _, id := range ids {
-		refs = append(refs, ir.NewDAGRunRef(req.Name, id))
+		refs = append(refs, ir.NewDAGRunRef(name, id))
 	}
-	return refs, err
+	return refs
 }
 
 // RemoveDAGRun removes a DAG run and all of its attempts.
@@ -501,6 +510,21 @@ func (store *Store) RemoveDAGRun(ctx context.Context, req persis.DAGRunRemoveReq
 		}
 		if status.Status.IsActive() {
 			return fmt.Errorf("%w: %s", dagrun.ErrDAGRunActive, status.Status.String())
+		}
+	}
+
+	// The retention gate is independent of RejectActive: it protects evidence
+	// runs even from rollback paths, and an unreadable marker fails closed.
+	if err := assertRetentionGate(run); err != nil {
+		return err
+	}
+
+	// Side effects that outlive the run (such as agent session cleanup jobs)
+	// are scheduled only while the root lock is held and every gate has
+	// passed, so a concurrent retention hold can never race them.
+	if req.BeforeCommit != nil {
+		if err := req.BeforeCommit(ctx); err != nil {
+			return fmt.Errorf("before-remove hook for dag-run %s: %w", dagRun.ID, err)
 		}
 	}
 

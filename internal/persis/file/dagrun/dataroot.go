@@ -264,110 +264,162 @@ func (dr DataRoot) Remove() error {
 	return nil
 }
 
+// removalDecision classifies a run during a retention sweep.
+type removalDecision int
+
+const (
+	removalKeep removalDecision = iota
+	removalRemove
+	removalRetained
+)
+
 // removeOldBefore removes dag-runs whose recorded time is strictly before keepTime.
-// Active (non-final) runs are never removed. If dryRun is true, it returns the run
-// IDs that would be removed without actually deleting them.
-func (dr DataRoot) removeOldBefore(ctx context.Context, keepTime persis.TimeInUTC, dryRun bool) ([]string, error) {
+// Active (non-final) runs are never removed. Runs with an explicit retention
+// hold are reported as retained and left in place. If dryRun is true, it returns
+// the classifications without deleting anything.
+func (dr DataRoot) removeOldBefore(ctx context.Context, keepTime persis.TimeInUTC, dryRun bool) (removedRunIDs, retainedRunIDs []string, err error) {
 	if keepTime.IsZero() {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	dagRuns := dr.listDAGRunsInRange(ctx, persis.TimeInUTC{}, keepTime, &listDAGRunsInRangeOpts{})
-
-	var (
-		removedRunIDs []string
-		removeErrs    []error
-	)
-
-	for _, r := range dagRuns {
-		removable, err := dr.canRemoveDAGRun(ctx, r, keepTime.Time)
-		if err != nil {
-			removeErrs = append(removeErrs, err)
-			continue
-		}
-		if !removable {
-			continue
-		}
-		if err := dr.removeDAGRun(ctx, r, dryRun); err != nil {
-			removeErrs = append(removeErrs, err)
-			continue
-		}
-		removedRunIDs = append(removedRunIDs, r.dagRunID)
-	}
-	return removedRunIDs, errors.Join(removeErrs...)
+	return dr.removeEvaluatedDAGRuns(ctx, dagRuns, keepTime.Time, dryRun)
 }
 
 // RemoveOldByRuns removes dag-runs beyond the most recent retentionRuns.
-// Active runs are preserved even when they fall outside the retained window.
-func (dr DataRoot) RemoveOldByRuns(ctx context.Context, retentionRuns int, dryRun bool) ([]string, error) {
+// Active runs and runs with an explicit retention hold are preserved even when
+// they fall outside the retained window.
+func (dr DataRoot) RemoveOldByRuns(ctx context.Context, retentionRuns int, dryRun bool) (removedRunIDs, retainedRunIDs []string, err error) {
 	if retentionRuns <= 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	dagRuns := dr.listDAGRunsInRange(ctx, persis.TimeInUTC{}, persis.TimeInUTC{}, &listDAGRunsInRangeOpts{})
 	if len(dagRuns) <= retentionRuns {
-		return nil, nil
+		return nil, nil, nil
 	}
 
-	var (
-		removedRunIDs []string
-		removeErrs    []error
-	)
-	for _, r := range dagRuns[retentionRuns:] {
-		removable, err := dr.canRemoveDAGRun(ctx, r, time.Time{})
-		if err != nil {
-			removeErrs = append(removeErrs, err)
-			continue
-		}
-		if !removable {
-			continue
-		}
-		if err := dr.removeDAGRun(ctx, r, dryRun); err != nil {
-			removeErrs = append(removeErrs, err)
-			continue
-		}
-		removedRunIDs = append(removedRunIDs, r.dagRunID)
-	}
-	return removedRunIDs, errors.Join(removeErrs...)
+	return dr.removeEvaluatedDAGRuns(ctx, dagRuns[retentionRuns:], time.Time{}, dryRun)
 }
 
-func (dr DataRoot) canRemoveDAGRun(ctx context.Context, r *DAGRun, keepTime time.Time) (bool, error) {
+func (dr DataRoot) removeEvaluatedDAGRuns(
+	ctx context.Context,
+	dagRuns []*DAGRun,
+	keepTime time.Time,
+	dryRun bool,
+) (removedRunIDs, retainedRunIDs []string, err error) {
+	var removeErrs []error
+
+	for _, r := range dagRuns {
+		decision, evalErr := dr.evaluateDAGRunRemoval(ctx, r, keepTime)
+		if evalErr != nil {
+			removeErrs = append(removeErrs, evalErr)
+			continue
+		}
+		switch decision {
+		case removalKeep:
+			continue
+		case removalRetained:
+			retainedRunIDs = append(retainedRunIDs, r.dagRunID)
+			continue
+		}
+
+		if dryRun {
+			removedRunIDs = append(removedRunIDs, r.dagRunID)
+			continue
+		}
+
+		// Re-evaluate under the root ownership lock so a retention hold that
+		// landed after the unlocked scan cannot be deleted or queued for
+		// asynchronous cleanup.
+		switch lockedDecision, lockErr := dr.removeDAGRunLocked(ctx, r, keepTime); {
+		case lockErr != nil:
+			removeErrs = append(removeErrs, lockErr)
+		case lockedDecision == removalRetained:
+			retainedRunIDs = append(retainedRunIDs, r.dagRunID)
+		default:
+			removedRunIDs = append(removedRunIDs, r.dagRunID)
+		}
+	}
+	return removedRunIDs, retainedRunIDs, errors.Join(removeErrs...)
+}
+
+// removeDAGRunLocked re-validates one run under the DataRoot lock and, when it
+// is still removable, deletes it. It returns the removal decision so a run that
+// gained a retention hold between scan and deletion is classified correctly.
+func (dr DataRoot) removeDAGRunLocked(ctx context.Context, r *DAGRun, keepTime time.Time) (removalDecision, error) {
+	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := dr.Lock(lockCtx); err != nil {
+		return removalKeep, fmt.Errorf("failed to acquire lock for dag-run %s: %w", r.dagRunID, err)
+	}
+	defer func() {
+		if err := dr.Unlock(); err != nil {
+			logger.Error(ctx, "Failed to unlock dag-run", tag.RunID(r.dagRunID), tag.Error(err))
+		}
+	}()
+
+	decision, err := dr.evaluateDAGRunRemoval(ctx, r, keepTime)
+	if err != nil {
+		return removalKeep, err
+	}
+	if decision != removalRemove {
+		return decision, nil
+	}
+	if err := dr.removeDAGRun(ctx, r, false); err != nil {
+		return removalKeep, err
+	}
+	return removalRemove, nil
+}
+
+func (dr DataRoot) evaluateDAGRunRemoval(ctx context.Context, r *DAGRun, keepTime time.Time) (removalDecision, error) {
 	runCtx := logger.WithValues(ctx, tag.Dir(r.baseDir))
 
 	latestAttempt, err := r.LatestAttempt(ctx, nil)
 	if err != nil {
 		logger.Error(runCtx, "Failed to get latest attempt", tag.Error(err))
-		return false, err
+		return removalKeep, err
 	}
 	hasStatuslessAttempt, err := hasNewerStatuslessAttempt(ctx, r, latestAttempt)
 	if err != nil {
 		logger.Error(runCtx, "Failed to inspect attempt directories", tag.Error(err))
-		return false, err
+		return removalKeep, err
 	}
 	if hasStatuslessAttempt {
 		logger.Debug(runCtx, "Skipping run with newer attempt missing status")
-		return false, nil
+		return removalKeep, nil
 	}
 	if !keepTime.IsZero() {
 		lastUpdate, err := latestAttempt.ModTime()
 		if err != nil {
 			logger.Error(runCtx, "Failed to get last modified time", tag.Error(err))
-			return false, err
+			return removalKeep, err
 		}
 		if lastUpdate.After(keepTime) {
-			return false, nil
+			return removalKeep, nil
 		}
 	}
 	latestStatus, err := latestAttempt.ReadStatus(ctx)
 	if err != nil {
 		logger.Error(runCtx, "Failed to read status", tag.Error(err))
-		return false, err
+		return removalKeep, err
 	}
 	if latestStatus.Status.IsActive() {
 		logger.Debug(runCtx, "Skipping active run", tag.Status(latestStatus.Status.String()))
-		return false, nil
+		return removalKeep, nil
 	}
-	return true, nil
+	// Explicit evidence retention wins over day/count policy. A marker that
+	// cannot be read fails closed: the run is kept and the sweep reports it.
+	retention, err := r.readRetentionLock()
+	if err != nil {
+		logger.Error(runCtx, "Failed to read retention state", tag.Error(err))
+		return removalKeep, err
+	}
+	if retention != nil {
+		logger.Debug(runCtx, "Skipping retention-locked run", tag.RunID(r.dagRunID))
+		return removalRetained, nil
+	}
+	return removalRemove, nil
 }
 
 func hasNewerStatuslessAttempt(ctx context.Context, r *DAGRun, latestAttempt *Attempt) (bool, error) {

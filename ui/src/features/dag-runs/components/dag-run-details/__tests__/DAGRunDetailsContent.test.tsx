@@ -17,6 +17,10 @@ vi.mock('@/features/dag-runs/components/common', () => ({
   DAGRunActions: () => null,
 }));
 
+vi.mock('../DAGRunRetentionControl', () => ({
+  default: () => null,
+}));
+
 vi.mock('@/features/dags/components', () => ({
   DAGStatus: () => null,
 }));

@@ -389,8 +389,8 @@ func (m *mockDAGRunStore) FindSubAttempt(_ context.Context, rootRef ir.DAGRunRef
 	}
 	return nil, dagrun.ErrDAGRunIDNotFound
 }
-func (m *mockDAGRunStore) RemoveOldDAGRuns(_ context.Context, _ persis.DAGRunRetentionRequest) ([]ir.DAGRunRef, error) {
-	return nil, nil
+func (m *mockDAGRunStore) RemoveOldDAGRuns(_ context.Context, _ persis.DAGRunRetentionRequest) (persis.DAGRunRetentionSelection, error) {
+	return persis.DAGRunRetentionSelection{}, nil
 }
 func (m *mockDAGRunStore) RemoveDAGRun(_ context.Context, _ persis.DAGRunRemoveRequest) error {
 	return nil

@@ -28,8 +28,19 @@ type DAGRunStore interface {
 	CompareAndSwapLatestAttemptStatus(ctx context.Context, req DAGRunCompareAndSwapStatusRequest) (*ir.DAGRunStatus, bool, error)
 	FindAttempt(ctx context.Context, ref ir.DAGRunRef) (dagrun.Attempt, error)
 	FindSubAttempt(ctx context.Context, root ir.DAGRunRef, childRunID string) (dagrun.Attempt, error)
-	RemoveOldDAGRuns(ctx context.Context, req DAGRunRetentionRequest) ([]ir.DAGRunRef, error)
+	RemoveOldDAGRuns(ctx context.Context, req DAGRunRetentionRequest) (DAGRunRetentionSelection, error)
 	RemoveDAGRun(ctx context.Context, req DAGRunRemoveRequest) error
+	// GetRetentionLock reads the explicit retention hold on a finished root
+	// DAG run. A nil lock with a nil error means the run is not held.
+	GetRetentionLock(ctx context.Context, root ir.DAGRunRef) (*RetentionLock, error)
+	// SetRetentionLock places a retention hold on a finished root DAG run.
+	// Repeated sets are idempotent: an existing valid hold is returned
+	// unchanged. The write shares the run's root ownership boundary with
+	// retention selection and removal.
+	SetRetentionLock(ctx context.Context, req DAGRunSetRetentionLockRequest) (*RetentionLock, error)
+	// ReleaseRetentionLock removes a retention hold. Releasing a run without
+	// a hold succeeds, so repeated releases are idempotent.
+	ReleaseRetentionLock(ctx context.Context, root ir.DAGRunRef) error
 	// PruneArtifacts removes artifact directories and index records that no
 	// surviving DAG run points to.
 	PruneArtifacts(ctx context.Context, req ArtifactPruneRequest) (*ArtifactPruneResult, error)
@@ -91,10 +102,45 @@ type DAGRunRetentionRequest struct {
 	DryRun    bool
 }
 
+// DAGRunRetentionSelection classifies runs selected by a retention sweep.
+type DAGRunRetentionSelection struct {
+	// Removable are runs the sweep would remove (dry run) or attempted to
+	// remove (actual sweep).
+	Removable []ir.DAGRunRef
+	// Retained are runs skipped because they carry an explicit retention hold.
+	Retained []ir.DAGRunRef
+}
+
 // DAGRunRemoveRequest identifies a DAG run to remove.
 type DAGRunRemoveRequest struct {
 	DAGRun       ir.DAGRunRef
 	RejectActive bool
+	// BeforeCommit, when non-nil, runs while the root ownership lock is held,
+	// after the run passed the active/retention gates and immediately before
+	// its files are removed. A failed callback aborts the removal and leaves
+	// the run untouched. It exists so side effects such as enqueueing agent
+	// session cleanup cannot be scheduled for a run that a concurrent
+	// retention hold just protected.
+	BeforeCommit func(ctx context.Context) error
+}
+
+// RetentionLock is an evidence-preservation hold placed on one finished root
+// DAG run. It is independent of the DAG's history retention policy and moves
+// with the run directory, so it survives process restarts.
+type RetentionLock struct {
+	// LockedAt is when the hold was first placed (UTC).
+	LockedAt time.Time `json:"locked_at"`
+	// LockedBy identifies the operator that placed the hold.
+	LockedBy string `json:"locked_by"`
+	// Reason is the optional justification recorded with the hold.
+	Reason string `json:"reason,omitempty"`
+}
+
+// DAGRunSetRetentionLockRequest places a retention hold on a root run.
+type DAGRunSetRetentionLockRequest struct {
+	DAGRun   ir.DAGRunRef
+	LockedBy string
+	Reason   string
 }
 
 // ArtifactPruneRequest describes a sweep for orphaned artifact directories.
@@ -190,6 +236,25 @@ type DAGRunRetentionOptions struct {
 type DAGRunRemoveOptions struct {
 	// RejectActive refuses to remove an active DAG run.
 	RejectActive bool
+}
+
+// DAGRunRemovalResult reports the outcome of a retention sweep.
+type DAGRunRemovalResult struct {
+	// Removed are the root run IDs that were removed (or would be removed in
+	// a dry run).
+	Removed []string
+	// Retained are the root run IDs skipped because of an explicit retention
+	// hold. In an actual sweep this also includes runs that were selected but
+	// gained a hold before their locked removal ran.
+	Retained []string
+}
+
+// DAGRunRetentionLockInput carries operator metadata for a retention hold.
+type DAGRunRetentionLockInput struct {
+	// LockedBy identifies the operator placing the hold.
+	LockedBy string
+	// Reason is an optional justification.
+	Reason string
 }
 
 // TimeInUTC wraps a time normalized to UTC.

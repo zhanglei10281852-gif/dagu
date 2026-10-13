@@ -3154,6 +3154,131 @@ func TestDeleteDAGRunRejectsActiveRun(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestDAGRunRetentionLifecycle(t *testing.T) {
+	server := test.SetupServer(t)
+	dag := &ir.DAG{Name: "retention_lifecycle_dag"}
+	ref := seedLatestDAGRunStatus(
+		t,
+		server,
+		dag,
+		"retention-run-1",
+		ir.Succeeded,
+		seedDAGRunStatusOptions{},
+	)
+	retentionPath := fmt.Sprintf("/api/v1/dag-runs/%s/%s/retention", ref.Name, ref.ID)
+
+	// Place the hold with a reason.
+	reason := "incident INC-77 evidence"
+	resp := server.Client().Put(retentionPath, api.DAGRunRetentionLockRequest{
+		Reason: &reason,
+	}).ExpectStatus(http.StatusOK).Send(t)
+
+	var hold api.DAGRunRetention
+	resp.Unmarshal(t, &hold)
+	require.NotEmpty(t, hold.LockedAt)
+	require.NotNil(t, hold.Reason)
+	require.Equal(t, "incident INC-77 evidence", *hold.Reason)
+
+	// Repeated put is idempotent and keeps the original metadata.
+	changedReason := "changed reason"
+	respAgain := server.Client().Put(retentionPath, api.DAGRunRetentionLockRequest{
+		Reason: &changedReason,
+	}).ExpectStatus(http.StatusOK).Send(t)
+	var holdAgain api.DAGRunRetention
+	respAgain.Unmarshal(t, &holdAgain)
+	require.Equal(t, hold, holdAgain)
+
+	// Run details expose the hold.
+	detailsResp := server.Client().Get(
+		fmt.Sprintf("/api/v1/dag-runs/%s/%s", ref.Name, ref.ID),
+	).ExpectStatus(http.StatusOK).Send(t)
+	var details struct {
+		DagRunDetails api.DAGRunDetails `json:"dagRunDetails"`
+	}
+	detailsResp.Unmarshal(t, &details)
+	require.NotNil(t, details.DagRunDetails.Retention)
+	require.Equal(t, hold.LockedAt, details.DagRunDetails.Retention.LockedAt)
+
+	// Explicit deletion conflicts deterministically and leaves the run intact.
+	deleteResp := server.Client().Delete(
+		fmt.Sprintf("/api/v1/dag-runs/%s/%s", ref.Name, ref.ID),
+	).ExpectStatus(http.StatusConflict).Send(t)
+	var deleteErr api.Error
+	deleteResp.Unmarshal(t, &deleteErr)
+	require.Equal(t, api.ErrorCodeConflict, deleteErr.Code)
+	_, err := server.DAGRunRepository.FindAttempt(server.Context, ref)
+	require.NoError(t, err)
+
+	// Retention policy sweep also reports the run as retained and keeps it.
+	cutoff := time.Now().Add(time.Hour)
+	result, err := server.DAGRunRepository.RemoveOldDAGRuns(server.Context, ref.Name, 0, persis.DAGRunRetentionOptions{
+		OlderThan: &cutoff,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.Removed)
+	assert.Contains(t, result.Retained, ref.ID)
+
+	// Release is idempotent and then normal deletion succeeds.
+	server.Client().Delete(retentionPath).ExpectStatus(http.StatusNoContent).Send(t)
+	server.Client().Delete(retentionPath).ExpectStatus(http.StatusNoContent).Send(t)
+	server.Client().Delete(
+		fmt.Sprintf("/api/v1/dag-runs/%s/%s", ref.Name, ref.ID),
+	).ExpectStatus(http.StatusNoContent).Send(t)
+	_, err = server.DAGRunRepository.FindAttempt(server.Context, ref)
+	require.ErrorIs(t, err, dagrun.ErrDAGRunIDNotFound)
+}
+
+func TestPutDAGRunRetentionRejectsActiveRun(t *testing.T) {
+	server := test.SetupServer(t)
+	dag := &ir.DAG{Name: "retention_active_dag"}
+	ref := seedLatestDAGRunStatus(
+		t,
+		server,
+		dag,
+		"retention-active-run",
+		ir.Running,
+		seedDAGRunStatusOptions{},
+	)
+
+	resp := server.Client().Put(
+		fmt.Sprintf("/api/v1/dag-runs/%s/%s/retention", ref.Name, ref.ID),
+		api.DAGRunRetentionLockRequest{},
+	).ExpectStatus(http.StatusConflict).Send(t)
+
+	var body api.Error
+	resp.Unmarshal(t, &body)
+	require.Equal(t, api.ErrorCodeConflict, body.Code)
+	require.Contains(t, body.Message, "active")
+
+	hold, err := server.DAGRunRepository.GetRetentionLock(server.Context, ref)
+	require.NoError(t, err)
+	assert.Nil(t, hold)
+}
+
+func TestDAGRunRetentionRejectsLatestAlias(t *testing.T) {
+	server := test.SetupServer(t)
+
+	resp := server.Client().Put(
+		"/api/v1/dag-runs/retention_latest_dag/latest/retention",
+		api.DAGRunRetentionLockRequest{},
+	).ExpectStatus(http.StatusBadRequest).Send(t)
+	var body api.Error
+	resp.Unmarshal(t, &body)
+	require.Equal(t, api.ErrorCodeBadRequest, body.Code)
+
+	server.Client().Delete(
+		"/api/v1/dag-runs/retention_latest_dag/latest/retention",
+	).ExpectStatus(http.StatusBadRequest).Send(t)
+}
+
+func TestReleaseDAGRunRetentionOnMissingRun(t *testing.T) {
+	server := test.SetupServer(t)
+
+	server.Client().Delete(
+		"/api/v1/dag-runs/retention_missing_dag/missing-run/retention",
+	).ExpectStatus(http.StatusNotFound).Send(t)
+}
+
 func indentCommandBlock(command string, spaces int) string {
 	trimmed := strings.Trim(command, "\n")
 	if trimmed == "" {

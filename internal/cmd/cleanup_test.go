@@ -422,9 +422,10 @@ func TestCleanupCommandRepository(t *testing.T) {
 		require.Len(t, statuses, 2)
 
 		// Remove runs older than 7 days
-		removedIDs, err := th.DAGRunRepository.RemoveOldDAGRuns(th.Context, dagName, 7, persis.DAGRunRetentionOptions{})
+		removed, err := th.DAGRunRepository.RemoveOldDAGRuns(th.Context, dagName, 7, persis.DAGRunRetentionOptions{})
 		require.NoError(t, err)
-		assert.Len(t, removedIDs, 1)
+		assert.Len(t, removed.Removed, 1)
+		assert.Empty(t, removed.Retained)
 
 		// Verify old run is deleted, recent run remains
 		statuses, err = th.DAGRunRepository.RecentStatuses(th.Context, dagName, 10)
@@ -454,6 +455,77 @@ func seedBothReplayCaches(t *testing.T, th test.Command, dagName string) {
 	t.Helper()
 	seedBrowserReplayCache(t, th, dagName, "login")
 	seedComputerReplayCache(t, th, dagName, "post")
+}
+
+// TestCleanupDistinguishesRetentionLockedRuns verifies that dry-run and actual
+// cleanup report would-delete and retention-skipped runs separately and never
+// remove a held run.
+func TestCleanupDistinguishesRetentionLockedRuns(t *testing.T) {
+	th := test.SetupCommand(t)
+	dagName := "cleanup-retention-dag"
+	testDAG := &ir.DAG{Name: dagName}
+	oldTime := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	seedOldRun := func(runID string) {
+		attempt, err := th.DAGRunRepository.CreateAttempt(
+			th.Context, testDAG, oldTime, runID, persis.DAGRunCreateAttemptOptions{},
+		)
+		require.NoError(t, err)
+		require.NoError(t, attempt.Open(th.Context))
+		require.NoError(t, attempt.Write(th.Context, ir.DAGRunStatus{
+			Name:     dagName,
+			DAGRunID: runID,
+			Status:   ir.Succeeded,
+		}))
+		require.NoError(t, attempt.Close(th.Context))
+	}
+
+	seedOldRun("held-run")
+	seedOldRun("free-run")
+	setOldModTime(t, th.Config.Paths.DAGRunsDir, dagName, "", oldTime)
+
+	heldRef := ir.NewDAGRunRef(dagName, "held-run")
+	_, err := th.DAGRunRepository.SetRetentionLock(th.Context, heldRef, persis.DAGRunRetentionLockInput{
+		LockedBy: "alice",
+		Reason:   "evidence",
+	})
+	require.NoError(t, err)
+
+	dryOut := captureStdout(t, func() {
+		th.RunCommand(t, cmd.Cleanup(), test.CmdTest{
+			Args: []string{"cleanup", "--retention-days", "0", "--dry-run", dagName},
+		})
+	})
+	assert.Contains(t, dryOut, "Dry run: Would delete 1 run(s)")
+	assert.Contains(t, dryOut, "free-run")
+	assert.Contains(t, dryOut, "Skipping 1 retention-locked run(s)")
+	assert.Contains(t, dryOut, "held-run")
+
+	statuses, err := th.DAGRunRepository.RecentStatuses(th.Context, dagName, 10)
+	require.NoError(t, err)
+	require.Len(t, statuses, 2, "dry run must not delete anything")
+
+	out := captureStdout(t, func() {
+		th.RunCommand(t, cmd.Cleanup(), test.CmdTest{
+			Args: []string{"cleanup", "--retention-days", "0", "--yes", dagName},
+		})
+	})
+	assert.Contains(t, out, "Successfully removed 1 run(s)")
+	assert.Contains(t, out, "Skipping 1 retention-locked run(s)")
+
+	statuses, err = th.DAGRunRepository.RecentStatuses(th.Context, dagName, 10)
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	assert.Equal(t, "held-run", statuses[0].DAGRunID)
+
+	// After release, the same cleanup removes the formerly held run.
+	require.NoError(t, th.DAGRunRepository.ReleaseRetentionLock(th.Context, heldRef))
+	th.RunCommand(t, cmd.Cleanup(), test.CmdTest{
+		Args: []string{"cleanup", "--retention-days", "0", "--yes", dagName},
+	})
+	statuses, err = th.DAGRunRepository.RecentStatuses(th.Context, dagName, 10)
+	require.NoError(t, err)
+	assert.Empty(t, statuses)
 }
 
 // captureStdout runs fn with process stdout redirected and returns what it

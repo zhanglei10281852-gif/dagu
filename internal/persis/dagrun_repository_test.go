@@ -229,8 +229,8 @@ func TestRepositoryCleansWorkDirsAfterRunMetadata(t *testing.T) {
 	workDirs := &recordingWorkDirStore{removeErr: workDirErr}
 	repository := persis.NewDAGRunRepository(backend, workDirs, persis.DAGRunRepositoryOptions{})
 
-	removed, err := repository.RemoveOldDAGRuns(context.Background(), "daily", 7, persis.DAGRunRetentionOptions{})
-	assert.Equal(t, []string{"run-1", "run-2"}, removed)
+	result, err := repository.RemoveOldDAGRuns(context.Background(), "daily", 7, persis.DAGRunRetentionOptions{})
+	assert.Equal(t, []string{"run-1", "run-2"}, result.Removed)
 	require.ErrorIs(t, err, workDirErr)
 	assert.Equal(t, []dagrun.WorkDirRef{
 		{RootDAGRun: ir.NewDAGRunRef("daily", "run-1"), DAGRun: ir.NewDAGRunRef("daily", "run-1")},
@@ -247,9 +247,10 @@ func TestRepositoryRetentionDryRunDoesNotRemoveWorkDirs(t *testing.T) {
 	workDirs := &recordingWorkDirStore{}
 	repository := persis.NewDAGRunRepository(backend, workDirs, persis.DAGRunRepositoryOptions{})
 
-	removed, err := repository.RemoveOldDAGRuns(context.Background(), "daily", 7, persis.DAGRunRetentionOptions{DryRun: true})
+	result, err := repository.RemoveOldDAGRuns(context.Background(), "daily", 7, persis.DAGRunRetentionOptions{DryRun: true})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"run-1"}, removed)
+	assert.Equal(t, []string{"run-1"}, result.Removed)
+	assert.Empty(t, result.Retained)
 	assert.Empty(t, workDirs.removed)
 }
 
@@ -288,7 +289,8 @@ func TestRepositoryEnqueuesAgentSessionsBeforeRemovingDAGRun(t *testing.T) {
 		StepName:      "agent",
 		Generation:    2,
 	}}, enqueuer.resources)
-	assert.Equal(t, persis.DAGRunRemoveRequest{DAGRun: ref}, backend.removeRequest)
+	assert.Equal(t, ref, backend.removeRequest.DAGRun)
+	assert.NotNil(t, backend.removeRequest.BeforeCommit)
 }
 
 func TestRepositoryRetentionRemovesExactlyQueuedDAGRuns(t *testing.T) {
@@ -305,13 +307,60 @@ func TestRepositoryRetentionRemovesExactlyQueuedDAGRuns(t *testing.T) {
 		RemovalEnqueuer: &recordingDAGRunRemovalEnqueuer{events: &events},
 	})
 
-	removed, err := repository.RemoveOldDAGRuns(context.Background(), "daily", 7, persis.DAGRunRetentionOptions{})
+	result, err := repository.RemoveOldDAGRuns(context.Background(), "daily", 7, persis.DAGRunRetentionOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"run-1"}, removed)
+	assert.Equal(t, []string{"run-1"}, result.Removed)
 	require.Len(t, backend.retentionRequests, 1)
 	assert.True(t, backend.retentionRequests[0].DryRun)
-	assert.Equal(t, []persis.DAGRunRemoveRequest{{DAGRun: ref, RejectActive: true}}, backend.removeRequests)
+	require.Len(t, backend.removeRequests, 1)
+	assert.Equal(t, ref, backend.removeRequests[0].DAGRun)
+	assert.True(t, backend.removeRequests[0].RejectActive)
+	assert.NotNil(t, backend.removeRequests[0].BeforeCommit)
 	assert.Equal(t, []string{"enqueue", "remove"}, events)
+}
+
+func TestRepositoryRetentionSkipsLockedRuns(t *testing.T) {
+	t.Parallel()
+
+	locked := ir.NewDAGRunRef("daily", "locked-run")
+	free := ir.NewDAGRunRef("daily", "free-run")
+	events := []string{}
+	enqueuer := &recordingDAGRunRemovalEnqueuer{events: &events}
+	backend := &recordingDAGRunStore{
+		removedRefs:  []ir.DAGRunRef{locked, free},
+		retainedRefs: []ir.DAGRunRef{ir.NewDAGRunRef("daily", "preview-locked")},
+		attempt:      &testutil.MockAttempt{Status: &ir.DAGRunStatus{}},
+		events:       &events,
+		removeErrs: map[string]error{
+			"locked-run": dagrun.ErrDAGRunRetentionLocked,
+		},
+	}
+	repository := persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{
+		RemovalEnqueuer: enqueuer,
+	})
+
+	result, err := repository.RemoveOldDAGRuns(context.Background(), "daily", 7, persis.DAGRunRetentionOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"free-run"}, result.Removed)
+	assert.Equal(t, []string{"preview-locked", "locked-run"}, result.Retained)
+	// The protected run never reaches the hook that schedules async cleanup.
+	assert.Equal(t, free, enqueuer.root)
+}
+
+func TestRepositoryRemoveDAGRunPropagatesRetentionConflict(t *testing.T) {
+	t.Parallel()
+
+	ref := ir.NewDAGRunRef("daily", "locked-run")
+	backend := &recordingDAGRunStore{
+		removeErrs: map[string]error{"locked-run": dagrun.ErrDAGRunRetentionLocked},
+	}
+	workDirs := &recordingWorkDirStore{}
+	repository := persis.NewDAGRunRepository(backend, workDirs, persis.DAGRunRepositoryOptions{})
+
+	err := repository.RemoveDAGRun(context.Background(), ref, persis.DAGRunRemoveOptions{RejectActive: true})
+	require.ErrorIs(t, err, dagrun.ErrDAGRunRetentionLocked)
+	assert.Empty(t, workDirs.removed)
+	assert.Nil(t, backend.removeRequest.BeforeCommit)
 }
 
 type recordingDAGRunStore struct {
@@ -326,9 +375,12 @@ type recordingDAGRunStore struct {
 	compareAndSwapRequest persis.DAGRunCompareAndSwapStatusRequest
 	compareAndSwapStatus  *ir.DAGRunStatus
 	removedRefs           []ir.DAGRunRef
+	retainedRefs          []ir.DAGRunRef
 	attempt               dagrun.Attempt
 	removeRequest         persis.DAGRunRemoveRequest
 	removeRequests        []persis.DAGRunRemoveRequest
+	removeErr             error
+	removeErrs            map[string]error
 	events                *[]string
 }
 
@@ -362,17 +414,30 @@ func (s *recordingDAGRunStore) CompareAndSwapLatestAttemptStatus(
 	return s.compareAndSwapStatus, true, nil
 }
 
-func (s *recordingDAGRunStore) RemoveOldDAGRuns(_ context.Context, req persis.DAGRunRetentionRequest) ([]ir.DAGRunRef, error) {
+func (s *recordingDAGRunStore) RemoveOldDAGRuns(_ context.Context, req persis.DAGRunRetentionRequest) (persis.DAGRunRetentionSelection, error) {
 	s.retentionRequest = req
 	s.retentionRequests = append(s.retentionRequests, req)
-	return s.removedRefs, nil
+	return persis.DAGRunRetentionSelection{Removable: s.removedRefs, Retained: s.retainedRefs}, nil
 }
 
 func (s *recordingDAGRunStore) FindAttempt(context.Context, ir.DAGRunRef) (dagrun.Attempt, error) {
 	return s.attempt, nil
 }
 
-func (s *recordingDAGRunStore) RemoveDAGRun(_ context.Context, req persis.DAGRunRemoveRequest) error {
+func (s *recordingDAGRunStore) RemoveDAGRun(ctx context.Context, req persis.DAGRunRemoveRequest) error {
+	// Mirror the file store contract: gates (retention/active) fail before the
+	// before-commit hook or any removal side effect can run.
+	if err := s.removeErrs[req.DAGRun.ID]; err != nil {
+		return err
+	}
+	if s.removeErr != nil {
+		return s.removeErr
+	}
+	if req.BeforeCommit != nil {
+		if err := req.BeforeCommit(ctx); err != nil {
+			return err
+		}
+	}
 	s.removeRequest = req
 	s.removeRequests = append(s.removeRequests, req)
 	if s.events != nil {
