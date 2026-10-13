@@ -24,8 +24,9 @@ import (
 )
 
 type fakeNotificationTransport struct {
-	destinations []string
-	flushFn      func(context.Context, string, NotificationBatch, bool) bool
+	destinations      []string
+	flushFn           func(context.Context, string, NotificationBatch, bool) bool
+	flushWithResultFn func(context.Context, string, NotificationBatch, bool) DeliveryOutcome
 }
 
 func (f *fakeNotificationTransport) NotificationDestinations() []string {
@@ -37,6 +38,21 @@ func (f *fakeNotificationTransport) FlushNotificationBatch(ctx context.Context, 
 		return true
 	}
 	return f.flushFn(ctx, destination, batch, allowLLM)
+}
+
+func (f *fakeNotificationTransport) FlushNotificationBatchWithResult(ctx context.Context, destination string, batch NotificationBatch, allowLLM bool) DeliveryOutcome {
+	if f.flushWithResultFn != nil {
+		return f.flushWithResultFn(ctx, destination, batch, allowLLM)
+	}
+	if f.FlushNotificationBatch(ctx, destination, batch, allowLLM) {
+		return DeliveredDeliveryOutcome()
+	}
+	return DeliveryOutcome{
+		Delivered: false,
+		Retryable: true,
+		Category:  DeliveryErrorUnknown,
+		Summary:   "fake transport failure",
+	}
 }
 
 type fakeRoutingNotificationTransport struct {
@@ -518,9 +534,8 @@ func TestNotificationMonitor_MigratesDeliveredWaitingKey(t *testing.T) {
 	deliveredAt := time.Now().UTC()
 	state := newNotificationMonitorState()
 	state.Destinations["dest-1"] = &notificationDestinationState{
-		Pending: make(map[string]NotificationEvent),
-		Delivered: map[string]time.Time{
-			legacyNotificationSeenKey(status): deliveredAt,
+		Records: map[string]*notificationDeliveryRecord{
+			legacyNotificationSeenKey(status): newDeliveredDeliveryRecord(legacyNotificationSeenKey(status), deliveredAt),
 		},
 	}
 	event := NotificationEvent{
@@ -536,8 +551,12 @@ func TestNotificationMonitor_MigratesDeliveredWaitingKey(t *testing.T) {
 	assert.True(t, changed)
 	assert.False(t, accepted)
 	destination := state.Destinations["dest-1"]
-	assert.NotContains(t, destination.Delivered, legacyNotificationSeenKey(status))
-	assert.Equal(t, deliveredAt, destination.Delivered[event.Key])
+	assert.NotContains(t, destination.Records, legacyNotificationSeenKey(status))
+	migrated := destination.Records[event.Key]
+	require.NotNil(t, migrated)
+	assert.Equal(t, DeliveryStatusDelivered, migrated.Status)
+	require.NotNil(t, migrated.DeliveredAt)
+	assert.Equal(t, deliveredAt, *migrated.DeliveredAt)
 }
 
 func TestNotificationMonitor_DoesNotMigrateLaterWaitingKey(t *testing.T) {
@@ -566,9 +585,8 @@ func TestNotificationMonitor_DoesNotMigrateLaterWaitingKey(t *testing.T) {
 	}
 	state := newNotificationMonitorState()
 	state.Destinations["dest-1"] = &notificationDestinationState{
-		Pending: make(map[string]NotificationEvent),
-		Delivered: map[string]time.Time{
-			legacyNotificationSeenKey(legacyStatus): deliveredAt,
+		Records: map[string]*notificationDeliveryRecord{
+			legacyNotificationSeenKey(legacyStatus): newDeliveredDeliveryRecord(legacyNotificationSeenKey(legacyStatus), deliveredAt),
 		},
 	}
 	event := NotificationEvent{
@@ -717,8 +735,8 @@ func TestNotificationMonitor_CommitSourceProgressDropsOldestPendingEvent(t *test
 
 	require.True(t, committed)
 	require.Len(t, queued, 2)
-	assert.True(t, monitor.state.SourceCursor.Equal(nextCursor))
-	pending := monitor.state.Destinations["dest-1"].Pending
+	require.True(t, monitor.state.SourceCursor.Equal(nextCursor))
+	pending := pendingRecordsOf(monitor.state.Destinations["dest-1"])
 	require.Len(t, pending, 2)
 	assert.NotContains(t, pending, events[0].Key)
 	assert.Contains(t, pending, events[1].Key)
@@ -730,9 +748,19 @@ func TestNormalizeNotificationMonitorConfig_DefaultsPendingLimit(t *testing.T) {
 
 	cfg := DefaultNotificationMonitorConfig()
 	cfg.PendingLimit = 0
+	cfg.MaxDeliveryAttempts = 0
+	cfg.DeliveryInitialBackoff = 0
+	cfg.DeliveryMaxBackoff = 0
+	cfg.DeadLetterTTL = 0
+	cfg.DeadLetterLimit = 0
 	normalizeNotificationMonitorConfig(&cfg)
 
 	assert.Equal(t, DefaultNotificationPendingLimit, cfg.PendingLimit)
+	assert.Equal(t, DefaultNotificationMaxDeliveryAttempts, cfg.MaxDeliveryAttempts)
+	assert.Equal(t, DefaultNotificationDeliveryInitialBackoff, cfg.DeliveryInitialBackoff)
+	assert.Equal(t, DefaultNotificationDeliveryMaxBackoff, cfg.DeliveryMaxBackoff)
+	assert.Equal(t, DefaultNotificationDeadLetterTTL, cfg.DeadLetterTTL)
+	assert.Equal(t, DefaultNotificationDeadLetterLimit, cfg.DeadLetterLimit)
 }
 
 func TestNotificationMonitor_RequeuePendingDropsFailedRunWithAutoRetryRemaining(t *testing.T) {
@@ -758,16 +786,15 @@ func TestNotificationMonitor_RequeuePendingDropsFailedRunWithAutoRetryRemaining(
 	monitor.state = newNotificationMonitorState()
 	monitor.state.Bootstrapped = true
 	monitor.state.Destinations["dest-1"] = &notificationDestinationState{
-		Pending: map[string]NotificationEvent{
-			event.Key: event,
+		Records: map[string]*notificationDeliveryRecord{
+			event.Key: newPendingDeliveryRecord(event, event.ObservedAt),
 		},
-		Delivered: make(map[string]time.Time),
 	}
 
 	monitor.requeuePending(context.Background(), []string{"dest-1"})
 
 	monitor.stateMu.Lock()
-	assert.Empty(t, monitor.state.Destinations["dest-1"].Pending)
+	assert.Empty(t, pendingRecordsOf(monitor.state.Destinations["dest-1"]))
 	monitor.stateMu.Unlock()
 	require.Never(t, func() bool {
 		return len(monitor.currentBatcher().TakeReady()) > 0

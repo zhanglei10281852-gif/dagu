@@ -2307,6 +2307,138 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/notification-deliveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List notification delivery records
+         * @description Returns paginated notification delivery lifecycle records (pending, delivered, and dead-lettered). Developer, manager, or admin only.
+         */
+        get: operations["listNotificationDeliveries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notification-deliveries/redrive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Redrive dead-lettered notification deliveries
+         * @description Reopens the selected dead-lettered records as a fresh pending generation
+         *     and queues them for immediate delivery. Records that are already pending
+         *     or delivered, or that no longer exist, return a stable per-record outcome
+         *     without being duplicated. Redrive is executed by the monitor instance
+         *     that currently owns the delivery lease. Developer, manager, or admin only.
+         *
+         */
+        post: operations["redriveNotificationDeliveries"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notification-deliveries/{recordId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a notification delivery record
+         * @description Returns a single notification delivery record by its opaque id. Developer, manager, or admin only.
+         */
+        get: operations["getNotificationDelivery"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/incident-deliveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List incident delivery records
+         * @description Returns paginated incident delivery lifecycle records (pending, delivered, and dead-lettered). Incident management requires an active Dagu license or trial. Developer, manager, or admin only.
+         */
+        get: operations["listIncidentDeliveries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/incident-deliveries/redrive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Redrive dead-lettered incident deliveries
+         * @description Reopens the selected dead-lettered incident delivery records as a fresh
+         *     pending generation and queues them for immediate delivery. Records that
+         *     are already pending or delivered, or that no longer exist, return a
+         *     stable per-record outcome without duplication. Redrive is executed by
+         *     the monitor instance that currently owns the delivery lease. Incident
+         *     management requires an active Dagu license or trial. Developer, manager,
+         *     or admin only.
+         *
+         */
+        post: operations["redriveIncidentDeliveries"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/incident-deliveries/{recordId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an incident delivery record
+         * @description Returns a single incident delivery record by its opaque id. Incident management requires an active Dagu license or trial. Developer, manager, or admin only.
+         */
+        get: operations["getIncidentDelivery"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/incident-providers": {
         parameters: {
             query?: never;
@@ -4863,6 +4995,87 @@ export interface components {
         /** @description Notification channels */
         NotificationChannelListResponse: {
             channels: components["schemas"]["NotificationChannel"][];
+        };
+        /**
+         * @description Lifecycle status of one event delivery to one destination.
+         * @enum {string}
+         */
+        NotificationDeliveryStatus: NotificationDeliveryStatus;
+        /**
+         * @description Classified reason for the most recent delivery failure.
+         * @enum {string}
+         */
+        NotificationDeliveryErrorCategory: NotificationDeliveryErrorCategory;
+        /**
+         * @description Stable result of a redrive request for one record.
+         * @enum {string}
+         */
+        NotificationDeliveryRedriveOutcome: NotificationDeliveryRedriveOutcome;
+        /** @description One event's delivery lifecycle record for one destination. */
+        NotificationDeliveryRecord: {
+            /** @description Opaque id for detail/redrive calls. */
+            recordId: string;
+            /** @description Internal destination identifier. */
+            destination: string;
+            eventKey: string;
+            dagName?: string;
+            dagRunId?: string;
+            attemptId?: string;
+            eventType?: string;
+            runStatus?: number;
+            dagFile?: string;
+            /** Format: date-time */
+            observedAt?: string | null;
+            status: components["schemas"]["NotificationDeliveryStatus"];
+            /** @description Automatic delivery attempts recorded. */
+            attempts: number;
+            /** @description Incremented each time the record is (re)opened as pending. */
+            generation: number;
+            lastErrorCategory?: components["schemas"]["NotificationDeliveryErrorCategory"];
+            /** @description Short credential-free failure summary. */
+            lastErrorSummary?: string;
+            /** Format: date-time */
+            lastAttemptAt?: string | null;
+            /** Format: date-time */
+            nextAttemptAt?: string | null;
+            /** Format: date-time */
+            deliveredAt?: string | null;
+            /** Format: date-time */
+            deadLetterAt?: string | null;
+            /** @description client_error, configuration, or attempt_limit. */
+            deadLetterReason?: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        NotificationDeliveryListResponse: {
+            records: components["schemas"]["NotificationDeliveryRecord"][];
+            /** @description Opaque cursor for the next page; empty when no more records exist. */
+            nextCursor?: string | null;
+        };
+        NotificationDeliveryRedriveRequest: {
+            /** @description Opaque record ids to redrive. */
+            recordIds: string[];
+        };
+        NotificationDeliveryRedriveResult: {
+            recordId: string;
+            outcome: components["schemas"]["NotificationDeliveryRedriveOutcome"];
+            status: components["schemas"]["NotificationDeliveryStatus"];
+            generation: number;
+        };
+        NotificationDeliveryRedriveResponse: {
+            results: components["schemas"]["NotificationDeliveryRedriveResult"][];
+        };
+        IncidentDeliveryListResponse: {
+            records: components["schemas"]["NotificationDeliveryRecord"][];
+            nextCursor?: string | null;
+        };
+        IncidentDeliveryRedriveRequest: {
+            recordIds: string[];
+        };
+        IncidentDeliveryRedriveResponse: {
+            results: components["schemas"]["NotificationDeliveryRedriveResult"][];
         };
         /** @description DAG subscription to a notification channel */
         NotificationSubscriptionInput: {
@@ -14665,6 +14878,354 @@ export interface operations {
             };
         };
     };
+    listNotificationDeliveries: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+                /** @description Filter by lifecycle status. Repeat the parameter or pass a comma-separated list. */
+                status?: PathsNotificationDeliveriesGetParametersQueryStatus[];
+                /** @description Exact destination identifier to filter by. */
+                destination?: string;
+                /** @description Opaque pagination cursor returned by a previous call. */
+                cursor?: string;
+                /** @description Page size (default 50, maximum 200). */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Page of notification delivery records */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationDeliveryListResponse"];
+                };
+            };
+            /** @description Invalid filter or pagination cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Forbidden - insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    redriveNotificationDeliveries: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotificationDeliveryRedriveRequest"];
+            };
+        };
+        responses: {
+            /** @description Per-record redrive outcomes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationDeliveryRedriveResponse"];
+                };
+            };
+            /** @description Invalid request or record id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Forbidden - insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description No delivery controller is active on this process */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getNotificationDelivery: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description Opaque delivery record id. */
+                recordId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Notification delivery record */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationDeliveryRecord"];
+                };
+            };
+            /** @description Forbidden - insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Record not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    listIncidentDeliveries: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+                /** @description Filter by lifecycle status. Repeat the parameter or pass a comma-separated list. */
+                status?: PathsIncidentDeliveriesGetParametersQueryStatus[];
+                /** @description Exact destination identifier to filter by. */
+                destination?: string;
+                /** @description Opaque pagination cursor returned by a previous call. */
+                cursor?: string;
+                /** @description Page size (default 50, maximum 200). */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Page of incident delivery records */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IncidentDeliveryListResponse"];
+                };
+            };
+            /** @description Invalid filter or pagination cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Forbidden - requires an active Dagu license or trial */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    redriveIncidentDeliveries: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IncidentDeliveryRedriveRequest"];
+            };
+        };
+        responses: {
+            /** @description Per-record redrive outcomes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IncidentDeliveryRedriveResponse"];
+                };
+            };
+            /** @description Invalid request or record id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Forbidden - requires an active Dagu license or trial */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description No delivery controller is active on this process */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getIncidentDelivery: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description Opaque delivery record id. */
+                recordId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Incident delivery record */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationDeliveryRecord"];
+                };
+            };
+            /** @description Forbidden - requires an active Dagu license or trial */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Record not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     listIncidentProviders: {
         parameters: {
             query?: {
@@ -21255,6 +21816,16 @@ export enum PathsDagsGetParametersQueryOrder {
     asc = "asc",
     desc = "desc"
 }
+export enum PathsNotificationDeliveriesGetParametersQueryStatus {
+    pending = "pending",
+    delivered = "delivered",
+    dead_letter = "dead_letter"
+}
+export enum PathsIncidentDeliveriesGetParametersQueryStatus {
+    pending = "pending",
+    delivered = "delivered",
+    dead_letter = "dead_letter"
+}
 export enum PathsWikiGetParametersQuerySort {
     name = "name",
     type = "type",
@@ -21331,6 +21902,25 @@ export enum NotificationSMTPOAuthProvider {
 export enum NotificationRouteScope {
     global = "global",
     workspace = "workspace"
+}
+export enum NotificationDeliveryStatus {
+    pending = "pending",
+    delivered = "delivered",
+    dead_letter = "dead_letter"
+}
+export enum NotificationDeliveryErrorCategory {
+    rate_limited = "rate_limited",
+    server_error = "server_error",
+    network = "network",
+    client_error = "client_error",
+    configuration = "configuration",
+    unknown = "unknown"
+}
+export enum NotificationDeliveryRedriveOutcome {
+    redriven = "redriven",
+    already_pending = "already_pending",
+    delivered = "delivered",
+    not_found = "not_found"
 }
 export enum IncidentProviderType {
     pagerduty = "pagerduty",

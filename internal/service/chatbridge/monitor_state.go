@@ -12,7 +12,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/eventstore"
 )
 
-const notificationMonitorStateVersion = 1
+const notificationMonitorStateVersion = 2
 
 type notificationStateLoadResult struct {
 	State           notificationMonitorState
@@ -30,8 +30,14 @@ type notificationMonitorState struct {
 }
 
 type notificationDestinationState struct {
+	// Pending and Delivered are the version-1 tables. They are accepted on
+	// decode (and migrated into Records) but are no longer written by the
+	// current monitor.
 	Pending   map[string]NotificationEvent `json:"pending,omitempty"`
 	Delivered map[string]time.Time         `json:"delivered,omitempty"`
+
+	// Records is the version-2 per-event delivery lifecycle table.
+	Records map[string]*notificationDeliveryRecord `json:"records,omitempty"`
 }
 
 func newNotificationMonitorState() notificationMonitorState {
@@ -55,13 +61,41 @@ func (s *notificationMonitorState) normalize() {
 			delete(s.Destinations, key)
 			continue
 		}
-		if destination.Pending == nil {
-			destination.Pending = make(map[string]NotificationEvent)
-		}
-		if destination.Delivered == nil {
-			destination.Delivered = make(map[string]time.Time)
+		destination.migrateLegacyTablesLocked()
+		if destination.Records == nil {
+			destination.Records = make(map[string]*notificationDeliveryRecord)
 		}
 	}
+}
+
+// migrateLegacyTablesLocked converts version-1 pending/delivered tables into
+// lifecycle records without losing information. Pending events become
+// immediately deliverable pending records; delivered timestamps become
+// delivered records. When both tables reference the same key, the pending
+// snapshot is authoritative because that event still has work to do.
+func (d *notificationDestinationState) migrateLegacyTablesLocked() {
+	if len(d.Pending) == 0 && len(d.Delivered) == 0 {
+		return
+	}
+	if d.Records == nil {
+		d.Records = make(map[string]*notificationDeliveryRecord, len(d.Pending)+len(d.Delivered))
+	}
+	now := time.Now().UTC()
+	for key, deliveredAt := range d.Delivered {
+		if _, exists := d.Records[key]; exists {
+			continue
+		}
+		d.Records[key] = newDeliveredDeliveryRecord(key, deliveredAt.UTC())
+	}
+	for key, event := range d.Pending {
+		observedAt := event.ObservedAt
+		if observedAt.IsZero() {
+			observedAt = now
+		}
+		d.Records[key] = newPendingDeliveryRecord(event, observedAt)
+	}
+	d.Pending = nil
+	d.Delivered = nil
 }
 
 type notificationStateStore struct {
@@ -121,6 +155,7 @@ func (s *notificationStateStore) Save(ctx context.Context, state notificationMon
 		return nil
 	}
 	state.normalize()
+	state.Version = notificationMonitorStateVersion
 
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -144,11 +179,12 @@ func decodeNotificationMonitorState(data []byte) (notificationMonitorState, erro
 		return state, fmt.Errorf("decode notification state: %w", err)
 	}
 	switch state.Version {
-	case 0, notificationMonitorStateVersion:
+	case 0, 1, notificationMonitorStateVersion:
 	default:
 		return state, fmt.Errorf("unsupported notification state version %d", state.Version)
 	}
 
 	state.normalize()
+	state.Version = notificationMonitorStateVersion
 	return state, nil
 }

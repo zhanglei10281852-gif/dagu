@@ -987,6 +987,7 @@ export const mainListItems = React.forwardRef<
                 '/notifications',
                 '/notification-rules',
                 '/notification-channels',
+                '/notification-deliveries',
               ]}
               to="/notifications"
               onClick={onNavItemClick}
@@ -1006,6 +1007,13 @@ export const mainListItems = React.forwardRef<
                 onClick={onNavItemClick}
                 customColor={customColor}
               />
+              <NavItem
+                to="/notification-deliveries"
+                text="Deliveries"
+                isOpen={isOpen}
+                onClick={onNavItemClick}
+                customColor={customColor}
+              />
             </NavGroup>
           )}
 
@@ -1019,6 +1027,7 @@ export const mainListItems = React.forwardRef<
                 '/incidents',
                 '/incident-providers',
                 '/incident-policies',
+                '/incident-deliveries',
               ]}
               to="/incidents"
               onClick={onNavItemClick}
@@ -1034,6 +1043,13 @@ export const mainListItems = React.forwardRef<
               <NavItem
                 to="/incident-policies"
                 text={t('navigation.routing')}
+                isOpen={isOpen}
+                onClick={onNavItemClick}
+                customColor={customColor}
+              />
+              <NavItem
+                to="/incident-deliveries"
+                text="Deliveries"
                 isOpen={isOpen}
                 onClick={onNavItemClick}
                 customColor={customColor}

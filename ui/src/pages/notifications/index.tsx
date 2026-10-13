@@ -381,6 +381,12 @@ export default function NotificationsPage(): ReactElement {
           description:
             'Manage Slack, email, webhook, and Telegram destinations.',
         },
+        {
+          to: '/notification-deliveries',
+          label: 'Delivery monitoring',
+          description:
+            'Inspect retries and dead-lettered notifications and redrive them after fixing a channel.',
+        },
       ],
     },
   ];

@@ -329,6 +329,7 @@ func (l *ConfigLoader) buildConfig(def Definition) (*Config, error) {
 	}
 	l.loadSecretsConfig(&cfg, def)
 	l.loadEventStoreConfig(&cfg, def)
+	l.loadNotificationConfig(&cfg, def)
 
 	// Load service-specific sections
 	sectionLoaders := []struct {
@@ -621,6 +622,46 @@ func (l *ConfigLoader) loadEventStoreConfig(cfg *Config, def Definition) {
 	if def.EventStore != nil && def.EventStore.RetentionDays != nil {
 		cfg.EventStore.RetentionDays = *def.EventStore.RetentionDays
 	}
+}
+
+func (l *ConfigLoader) loadNotificationConfig(cfg *Config, def Definition) {
+	delivery := NotificationDeliveryConfig{
+		MaxAttempts:    l.v.GetInt("notification.delivery.max_attempts"),
+		InitialBackoff: l.v.GetDuration("notification.delivery.initial_backoff"),
+		MaxBackoff:     l.v.GetDuration("notification.delivery.max_backoff"),
+		DeadLetterTTL:  l.v.GetDuration("notification.delivery.dead_letter_ttl"),
+		DeadLetterLimit: l.v.GetInt("notification.delivery.dead_letter_limit"),
+	}
+	if def.Notification != nil && def.Notification.Delivery != nil {
+		override := def.Notification.Delivery
+		if override.MaxAttempts != nil {
+			delivery.MaxAttempts = *override.MaxAttempts
+		}
+		if override.DeadLetterLimit != nil {
+			delivery.DeadLetterLimit = *override.DeadLetterLimit
+		}
+		durationFields := []struct {
+			key    string
+			value  *string
+			target *time.Duration
+		}{
+			{key: "initial_backoff", value: override.InitialBackoff, target: &delivery.InitialBackoff},
+			{key: "max_backoff", value: override.MaxBackoff, target: &delivery.MaxBackoff},
+			{key: "dead_letter_ttl", value: override.DeadLetterTTL, target: &delivery.DeadLetterTTL},
+		}
+		for _, field := range durationFields {
+			if field.value == nil {
+				continue
+			}
+			duration, err := time.ParseDuration(*field.value)
+			if err != nil {
+				l.warnings = append(l.warnings, fmt.Sprintf("Invalid notification.delivery.%s value: %q", field.key, *field.value))
+				continue
+			}
+			*field.target = duration
+		}
+	}
+	cfg.Notification.Delivery = delivery
 }
 
 func (l *ConfigLoader) loadServerConfig(cfg *Config, def Definition) {
@@ -2140,6 +2181,13 @@ func (l *ConfigLoader) setViperDefaultValues(paths Paths) {
 	l.v.SetDefault("event_store.enabled", true)
 	l.v.SetDefault("event_store.retention_days", 1)
 
+	// Notification delivery lifecycle
+	l.v.SetDefault("notification.delivery.max_attempts", 10)
+	l.v.SetDefault("notification.delivery.initial_backoff", "30s")
+	l.v.SetDefault("notification.delivery.max_backoff", "1h")
+	l.v.SetDefault("notification.delivery.dead_letter_ttl", "336h") // 14 days
+	l.v.SetDefault("notification.delivery.dead_letter_limit", 1000)
+
 	// Webhooks
 	l.v.SetDefault("webhooks.max_payload_size", DefaultWebhookMaxPayloadSize)
 
@@ -2191,6 +2239,11 @@ var envBindings = []envBinding{
 	{key: "audit.retention_days", env: "AUDIT_RETENTION_DAYS"},
 	{key: "event_store.enabled", env: "EVENT_STORE_ENABLED"},
 	{key: "event_store.retention_days", env: "EVENT_STORE_RETENTION_DAYS"},
+	{key: "notification.delivery.max_attempts", env: "NOTIFICATION_DELIVERY_MAX_ATTEMPTS"},
+	{key: "notification.delivery.initial_backoff", env: "NOTIFICATION_DELIVERY_INITIAL_BACKOFF"},
+	{key: "notification.delivery.max_backoff", env: "NOTIFICATION_DELIVERY_MAX_BACKOFF"},
+	{key: "notification.delivery.dead_letter_ttl", env: "NOTIFICATION_DELIVERY_DEAD_LETTER_TTL"},
+	{key: "notification.delivery.dead_letter_limit", env: "NOTIFICATION_DELIVERY_DEAD_LETTER_LIMIT"},
 	{key: "webhooks.max_payload_size", env: "WEBHOOKS_MAX_PAYLOAD_SIZE"},
 	{key: "sse.max_topics_per_connection", env: "SSE_MAX_TOPICS_PER_CONNECTION"},
 	{key: "sse.max_clients", env: "SSE_MAX_CLIENTS"},

@@ -540,13 +540,17 @@ func (s *Service) dagDestinationsForEvent(ctx context.Context, setting *notifica
 	return destinations
 }
 
-func (s *Service) FlushNotificationBatch(ctx context.Context, destination string, batch chatbridge.NotificationBatch, _ bool) bool {
+func (s *Service) FlushNotificationBatch(ctx context.Context, destination string, batch chatbridge.NotificationBatch, allowLLM bool) bool {
+	return s.FlushNotificationBatchWithResult(ctx, destination, batch, allowLLM).Delivered
+}
+
+func (s *Service) FlushNotificationBatchWithResult(ctx context.Context, destination string, batch chatbridge.NotificationBatch, allowLLM bool) chatbridge.DeliveryOutcome {
 	if route := parseRouteDestinationID(destination); route.OK {
-		return s.flushRouteNotificationBatch(ctx, destination, route.Scope, route.Workspace, route.RouteID, batch)
+		return s.flushRouteNotificationBatchResult(ctx, destination, route.Scope, route.Workspace, route.RouteID, batch)
 	}
 	parsed := parseDestinationID(destination)
 	if !parsed.OK {
-		return false
+		return deliveryOutcomeFromError(errors.New("notification destination id is malformed"))
 	}
 	setting, err := s.GetByDAGName(ctx, parsed.DAGName)
 	if err != nil {
@@ -554,33 +558,33 @@ func (s *Service) FlushNotificationBatch(ctx context.Context, destination string
 			slog.String("destination", destination),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return retryableDeliveryOutcome("failed to load notification settings for delivery")
 	}
 	if parsed.Kind == destinationKindChannel {
 		if !s.reusableChannelsAllowed() {
-			return true
+			return chatbridge.DeliveredDeliveryOutcome()
 		}
 		subscription, ok := findSubscription(setting, parsed.TargetID)
 		if !ok || !subscription.Enabled {
-			return true
+			return chatbridge.DeliveredDeliveryOutcome()
 		}
 		channel, err := s.GetChannel(ctx, subscription.ChannelID)
 		if err != nil {
 			if errors.Is(err, notificationmodel.ErrChannelNotFound) {
-				return true
+				return chatbridge.DeliveredDeliveryOutcome()
 			}
 			s.logger.Warn("Failed to load notification channel for delivery",
 				slog.String("destination", destination),
 				slog.String("error", err.Error()),
 			)
-			return false
+			return retryableDeliveryOutcome("failed to load notification channel for delivery")
 		}
 		if !channel.Enabled {
-			return true
+			return chatbridge.DeliveredDeliveryOutcome()
 		}
 		events := matchingSubscriptionEvents(setting, subscription, batch.Events)
 		if len(events) == 0 {
-			return true
+			return chatbridge.DeliveredDeliveryOutcome()
 		}
 		target := channel.ToTarget()
 		if err := s.deliverTarget(ctx, target, events); err != nil {
@@ -589,17 +593,17 @@ func (s *Service) FlushNotificationBatch(ctx context.Context, destination string
 				slog.String("provider", string(target.Type)),
 				slog.String("error", err.Error()),
 			)
-			return false
+			return deliveryOutcomeFromError(err)
 		}
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	target, ok := findTarget(setting, parsed.TargetID)
 	if !ok || !target.Enabled {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	events := matchingEvents(setting, target, batch.Events)
 	if len(events) == 0 {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 
 	if target.Type != notificationmodel.ProviderEmail &&
@@ -611,7 +615,7 @@ func (s *Service) FlushNotificationBatch(ctx context.Context, destination string
 			slog.String("destination", destination),
 			slog.String("provider", string(target.Type)),
 		)
-		return false
+		return deliveryOutcomeFromError(errors.New("unsupported notification target provider"))
 	}
 	if err := s.deliverTarget(ctx, target, events); err != nil {
 		s.logger.Warn("Failed to deliver DAG notification",
@@ -619,9 +623,9 @@ func (s *Service) FlushNotificationBatch(ctx context.Context, destination string
 			slog.String("provider", string(target.Type)),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return deliveryOutcomeFromError(err)
 	}
-	return true
+	return chatbridge.DeliveredDeliveryOutcome()
 }
 
 func (s *Service) flushRouteNotificationBatch(
@@ -632,41 +636,52 @@ func (s *Service) flushRouteNotificationBatch(
 	routeID string,
 	batch chatbridge.NotificationBatch,
 ) bool {
+	return s.flushRouteNotificationBatchResult(ctx, destination, scope, workspace, routeID, batch).Delivered
+}
+
+func (s *Service) flushRouteNotificationBatchResult(
+	ctx context.Context,
+	destination string,
+	scope notificationmodel.RouteScope,
+	workspace string,
+	routeID string,
+	batch chatbridge.NotificationBatch,
+) chatbridge.DeliveryOutcome {
 	if !s.reusableChannelsAllowed() {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	routeSet, err := s.loadRouteSet(ctx, scope, workspace)
 	if err != nil {
 		if errors.Is(err, notificationmodel.ErrRouteSetNotFound) {
-			return true
+			return chatbridge.DeliveredDeliveryOutcome()
 		}
 		s.logger.Warn("Failed to load notification route set for delivery",
 			slog.String("destination", destination),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return retryableDeliveryOutcome("failed to load notification route set for delivery")
 	}
 	route, ok := findRoute(routeSet, routeID)
 	if !ok || !route.Enabled || !routeSet.Enabled {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	channel, err := s.GetChannel(ctx, route.ChannelID)
 	if err != nil {
 		if errors.Is(err, notificationmodel.ErrChannelNotFound) {
-			return true
+			return chatbridge.DeliveredDeliveryOutcome()
 		}
 		s.logger.Warn("Failed to load notification channel for route delivery",
 			slog.String("destination", destination),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return retryableDeliveryOutcome("failed to load notification channel for route delivery")
 	}
 	if !channel.Enabled {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	events := s.matchingRouteEvents(ctx, routeSet, route, batch.Events)
 	if len(events) == 0 {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	target := channel.ToTarget()
 	if err := s.deliverTarget(ctx, target, events); err != nil {
@@ -675,9 +690,9 @@ func (s *Service) flushRouteNotificationBatch(
 			slog.String("provider", string(target.Type)),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return deliveryOutcomeFromError(err)
 	}
-	return true
+	return chatbridge.DeliveredDeliveryOutcome()
 }
 
 func (s *Service) ShouldDeliverNotificationBatch(chatbridge.NotificationBatch) bool {
@@ -1447,7 +1462,7 @@ func (s *Service) sendTeams(ctx context.Context, target notificationmodel.Target
 // HTTP 429.
 func teamsThrottleError(body string) error {
 	if strings.Contains(body, "Microsoft Teams endpoint returned HTTP error 429") {
-		return temporaryDeliveryError{err: errors.New("teams webhook is rate limited")}
+		return newDeliveryError(errors.New("teams webhook is rate limited"), chatbridge.DeliveryErrorRateLimited, true, 0)
 	}
 	return nil
 }
@@ -1507,7 +1522,7 @@ func (s *Service) doWebhookRequest(req *http.Request) error {
 func (s *Service) deliverRequest(req *http.Request, checkBody func(body string) error) error {
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return temporaryDeliveryError{err: err}
+		return newDeliveryError(err, chatbridge.DeliveryErrorNetwork, true, 0)
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -1515,10 +1530,16 @@ func (s *Service) deliverRequest(req *http.Request, checkBody func(body string) 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body := limitedResponseBody(resp.Body)
 		err := fmt.Errorf("notification endpoint returned HTTP %d%s", resp.StatusCode, body)
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			return temporaryDeliveryError{err: err}
+		switch {
+		case resp.StatusCode == http.StatusTooManyRequests:
+			return newDeliveryError(err, chatbridge.DeliveryErrorRateLimited, true, retryAfterDuration(resp.Header))
+		case resp.StatusCode == http.StatusRequestTimeout:
+			return newDeliveryError(err, chatbridge.DeliveryErrorNetwork, true, 0)
+		case resp.StatusCode >= 500:
+			return newDeliveryError(err, chatbridge.DeliveryErrorServerError, true, 0)
+		default:
+			return newDeliveryError(err, chatbridge.DeliveryErrorClientError, false, 0)
 		}
-		return err
 	}
 	if checkBody != nil {
 		return checkBody(readLimitedBody(resp.Body))
@@ -1526,24 +1547,82 @@ func (s *Service) deliverRequest(req *http.Request, checkBody func(body string) 
 	return nil
 }
 
-type temporaryDeliveryError struct {
-	err error
+// retryAfterDuration parses the Retry-After header as either delta seconds or
+// an HTTP date. Unparseable or absent values yield zero.
+func retryAfterDuration(header http.Header) time.Duration {
+	value := strings.TrimSpace(header.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		if wait := time.Until(when); wait > 0 {
+			return wait
+		}
+	}
+	return 0
 }
 
-func (e temporaryDeliveryError) Error() string {
+type deliveryError struct {
+	err        error
+	category   chatbridge.DeliveryErrorCategory
+	retryable  bool
+	retryAfter time.Duration
+}
+
+func newDeliveryError(err error, category chatbridge.DeliveryErrorCategory, retryable bool, retryAfter time.Duration) deliveryError {
+	return deliveryError{err: err, category: category, retryable: retryable, retryAfter: retryAfter}
+}
+
+func (e deliveryError) Error() string {
 	if e.err == nil {
-		return "temporary notification delivery error"
+		return "notification delivery error"
 	}
 	return e.err.Error()
 }
 
-func (e temporaryDeliveryError) Unwrap() error {
+func (e deliveryError) Unwrap() error {
 	return e.err
 }
 
 func isTemporaryDeliveryError(err error) bool {
-	var temporary temporaryDeliveryError
-	return errors.As(err, &temporary)
+	var deliveryErr deliveryError
+	return errors.As(err, &deliveryErr) && deliveryErr.retryable
+}
+
+// deliveryOutcomeFromError converts a delivery-layer error into a structured,
+// sanitized outcome. Errors not explicitly classified by the HTTP layer are
+// deterministic local failures (configuration, templates, URL validation) and
+// dead-letter immediately.
+func deliveryOutcomeFromError(err error) chatbridge.DeliveryOutcome {
+	if err == nil {
+		return chatbridge.DeliveredDeliveryOutcome()
+	}
+	var deliveryErr deliveryError
+	if errors.As(err, &deliveryErr) {
+		return chatbridge.DeliveryOutcome{
+			Delivered:  false,
+			Retryable: deliveryErr.retryable,
+			Category:   deliveryErr.category,
+			Summary:    chatbridge.SanitizeDeliveryMessage(deliveryErr.Error()),
+			RetryAfter: deliveryErr.retryAfter,
+		}
+	}
+	return chatbridge.DeliveryOutcome{
+		Delivered: false,
+		Retryable: false,
+		Category:  chatbridge.DeliveryErrorConfiguration,
+		Summary:   chatbridge.SanitizeDeliveryMessage(err.Error()),
+	}
+}
+
+// retryableDeliveryOutcome represents an internal failure (for example a
+// settings store read) where the destination itself is healthy and the
+// attempt must be retried.
+func retryableDeliveryOutcome(summary string) chatbridge.DeliveryOutcome {
+	return chatbridge.RetryableDeliveryOutcome(chatbridge.DeliveryErrorUnknown, summary)
 }
 
 func (s *Service) withRetry(ctx context.Context, send func() error) error {

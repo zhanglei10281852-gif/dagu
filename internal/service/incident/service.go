@@ -20,6 +20,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -427,57 +428,61 @@ func (s *Service) resolveDestinationsForEvent(ctx context.Context, event chatbri
 	return destinations
 }
 
-func (s *Service) FlushNotificationBatch(ctx context.Context, destination string, batch chatbridge.NotificationBatch, _ bool) bool {
+func (s *Service) FlushNotificationBatch(ctx context.Context, destination string, batch chatbridge.NotificationBatch, allowLLM bool) bool {
+	return s.FlushNotificationBatchWithResult(ctx, destination, batch, allowLLM).Delivered
+}
+
+func (s *Service) FlushNotificationBatchWithResult(ctx context.Context, destination string, batch chatbridge.NotificationBatch, _ bool) chatbridge.DeliveryOutcome {
 	if !s.incidentsAllowed() {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	if parsedState := parseStateDestinationID(destination); parsedState.OK {
 		for _, event := range batch.Events {
-			if !s.resolveIncidentState(ctx, parsedState.ProviderID, parsedState.DedupKey, event) {
-				return false
+			if outcome := s.resolveIncidentState(ctx, parsedState.ProviderID, parsedState.DedupKey, event); !outcome.Delivered {
+				return outcome
 			}
 		}
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	parsed := parsePolicyDestinationID(destination)
 	if !parsed.OK {
-		return false
+		return chatbridge.PermanentDeliveryOutcome(chatbridge.DeliveryErrorConfiguration, "incident destination id is malformed")
 	}
 	policySet, err := s.loadPolicySet(ctx, parsed.Scope, parsed.Workspace, parsed.DAGName)
 	if err != nil {
 		if errors.Is(err, incidentmodel.ErrPolicySetNotFound) {
-			return true
+			return chatbridge.DeliveredDeliveryOutcome()
 		}
 		s.logger.Warn("Failed to load incident policy set",
 			slog.String("destination", destination),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return chatbridge.RetryableDeliveryOutcome(chatbridge.DeliveryErrorUnknown, "failed to load incident policy set")
 	}
 	policy, ok := findPolicy(policySet, parsed.PolicyID)
 	if !ok || !policy.Enabled || !policySetDeliversOwnPolicies(policySet) {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	provider, err := s.GetProvider(ctx, policy.ProviderID)
 	if err != nil {
 		if errors.Is(err, incidentmodel.ErrProviderNotFound) {
-			return true
+			return chatbridge.DeliveredDeliveryOutcome()
 		}
 		s.logger.Warn("Failed to load incident provider",
 			slog.String("provider", policy.ProviderID),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return chatbridge.RetryableDeliveryOutcome(chatbridge.DeliveryErrorUnknown, "failed to load incident provider")
 	}
 	if !provider.Enabled {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	for _, event := range batch.Events {
-		if !s.deliverIncidentEvent(ctx, policySet, policy, provider, event) {
-			return false
+		if outcome := s.deliverIncidentEvent(ctx, policySet, policy, provider, event); !outcome.Delivered {
+			return outcome
 		}
 	}
-	return true
+	return chatbridge.DeliveredDeliveryOutcome()
 }
 
 func (s *Service) ShouldDeliverNotificationBatch(chatbridge.NotificationBatch) bool {
@@ -490,12 +495,12 @@ func (s *Service) deliverIncidentEvent(
 	policy incidentmodel.Policy,
 	provider *incidentmodel.Provider,
 	event chatbridge.NotificationEvent,
-) bool {
+) chatbridge.DeliveryOutcome {
 	if !incidentEventSupported(event) || !policyMatchesEvent(policy, event.Type) {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	if effective := s.effectivePolicySetForEvent(ctx, event); policySetID(effective) != policySetID(policySet) {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	dedupKey := systemDedupKey(provider.ID, event)
 	if dedupKey == "" {
@@ -503,7 +508,7 @@ func (s *Service) deliverIncidentEvent(
 			slog.String("policy_id", policy.ID),
 			slog.String("dag", event.Status.Name),
 		)
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	if event.Type == eventstore.TypeDAGRunFailed {
 		return s.openIncident(ctx, provider, policy, event, dedupKey)
@@ -511,26 +516,26 @@ func (s *Service) deliverIncidentEvent(
 	if isRecoveryEvent(event.Type) {
 		return s.resolveIncident(ctx, provider, policy, event, dedupKey)
 	}
-	return true
+	return chatbridge.DeliveredDeliveryOutcome()
 }
 
-func (s *Service) resolveIncidentState(ctx context.Context, providerID, dedupKey string, event chatbridge.NotificationEvent) bool {
+func (s *Service) resolveIncidentState(ctx context.Context, providerID, dedupKey string, event chatbridge.NotificationEvent) chatbridge.DeliveryOutcome {
 	if event.Status == nil || !isRecoveryEvent(event.Type) {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	provider, err := s.GetProvider(ctx, providerID)
 	if err != nil {
 		if errors.Is(err, incidentmodel.ErrProviderNotFound) {
-			return true
+			return chatbridge.DeliveredDeliveryOutcome()
 		}
 		s.logger.Warn("Failed to load incident provider",
 			slog.String("provider", providerID),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return chatbridge.RetryableDeliveryOutcome(chatbridge.DeliveryErrorUnknown, "failed to load incident provider")
 	}
 	if !provider.Enabled {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	return s.resolveIncident(ctx, provider, incidentmodel.Policy{
 		ProviderID: provider.ID,
@@ -539,7 +544,7 @@ func (s *Service) resolveIncidentState(ctx context.Context, providerID, dedupKey
 	}, event, dedupKey)
 }
 
-func (s *Service) openIncident(ctx context.Context, provider *incidentmodel.Provider, policy incidentmodel.Policy, event chatbridge.NotificationEvent, dedupKey string) bool {
+func (s *Service) openIncident(ctx context.Context, provider *incidentmodel.Provider, policy incidentmodel.Policy, event chatbridge.NotificationEvent, dedupKey string) chatbridge.DeliveryOutcome {
 	delivery, err := s.withRetry(ctx, func() (*providerDeliveryResult, error) {
 		return s.sendProviderEvent(ctx, provider, providerActionTrigger, dedupKey, policy, event)
 	})
@@ -550,7 +555,7 @@ func (s *Service) openIncident(ctx context.Context, provider *incidentmodel.Prov
 			slog.String("dedup_key", dedupKey),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return deliveryOutcomeFromError(err)
 	}
 	openedAt := time.Now().UTC()
 	externalID := delivery.ExternalID
@@ -576,28 +581,28 @@ func (s *Service) openIncident(ctx context.Context, provider *incidentmodel.Prov
 	})
 	if err != nil {
 		s.logger.Warn("Failed to normalize incident state", slog.String("error", err.Error()))
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	if err := s.store.SaveState(ctx, state); err != nil {
 		s.logger.Warn("Failed to save incident state", slog.String("error", err.Error()))
 	}
-	return true
+	return chatbridge.DeliveredDeliveryOutcome()
 }
 
-func (s *Service) resolveIncident(ctx context.Context, provider *incidentmodel.Provider, policy incidentmodel.Policy, event chatbridge.NotificationEvent, dedupKey string) bool {
+func (s *Service) resolveIncident(ctx context.Context, provider *incidentmodel.Provider, policy incidentmodel.Policy, event chatbridge.NotificationEvent, dedupKey string) chatbridge.DeliveryOutcome {
 	state, err := s.store.GetState(ctx, provider.ID, dedupKey)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return true
+			return chatbridge.DeliveredDeliveryOutcome()
 		}
 		s.logger.Warn("Failed to load incident state", slog.String("error", err.Error()))
-		return false
+		return chatbridge.RetryableDeliveryOutcome(chatbridge.DeliveryErrorUnknown, "failed to load incident state")
 	}
 	if state.Status != incidentmodel.IncidentStatusOpen {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	if !stateMatchesEvent(state, event) {
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	delivery, err := s.withRetry(ctx, func() (*providerDeliveryResult, error) {
 		return s.sendProviderEvent(ctx, provider, providerActionResolve, dedupKey, policy, event)
@@ -613,7 +618,7 @@ func (s *Service) resolveIncident(ctx context.Context, provider *incidentmodel.P
 			slog.String("dedup_key", dedupKey),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return deliveryOutcomeFromError(err)
 	}
 	state.Status = incidentmodel.IncidentStatusResolved
 	state.ResolvedAt = time.Now().UTC()
@@ -632,12 +637,12 @@ func (s *Service) resolveIncident(ctx context.Context, provider *incidentmodel.P
 	normalized, err := incidentmodel.NormalizeState(state)
 	if err != nil {
 		s.logger.Warn("Failed to normalize resolved incident state", slog.String("error", err.Error()))
-		return true
+		return chatbridge.DeliveredDeliveryOutcome()
 	}
 	if err := s.store.SaveState(ctx, normalized); err != nil {
 		s.logger.Warn("Failed to save resolved incident state", slog.String("error", err.Error()))
 	}
-	return true
+	return chatbridge.DeliveredDeliveryOutcome()
 }
 
 func (s *Service) effectivePolicySetForEvent(ctx context.Context, event chatbridge.NotificationEvent) *incidentmodel.PolicySet {
@@ -982,7 +987,7 @@ func (s *Service) sendSolarWinds(
 func (s *Service) doJSONRequest(req *http.Request) (*providerDeliveryResult, error) {
 	resp, err := s.http.Do(req) //nolint:gosec // Provider URLs are validated before request creation; private network targets require explicit configuration.
 	if err != nil {
-		return nil, temporaryDeliveryError{err: err}
+		return nil, newDeliveryError(err, chatbridge.DeliveryErrorNetwork, true, 0)
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -990,10 +995,16 @@ func (s *Service) doJSONRequest(req *http.Request) (*providerDeliveryResult, err
 	body := limitedResponseBody(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		err := fmt.Errorf("incident provider returned HTTP %d%s", resp.StatusCode, responseBodySuffix(body))
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			return nil, temporaryDeliveryError{err: err}
+		switch {
+		case resp.StatusCode == http.StatusTooManyRequests:
+			return nil, newDeliveryError(err, chatbridge.DeliveryErrorRateLimited, true, retryAfterDuration(resp.Header))
+		case resp.StatusCode == http.StatusRequestTimeout:
+			return nil, newDeliveryError(err, chatbridge.DeliveryErrorNetwork, true, 0)
+		case resp.StatusCode >= 500:
+			return nil, newDeliveryError(err, chatbridge.DeliveryErrorServerError, true, 0)
+		default:
+			return nil, newDeliveryError(err, chatbridge.DeliveryErrorClientError, false, 0)
 		}
-		return nil, err
 	}
 	return providerDeliveryResultFromBody(body), nil
 }
@@ -1043,24 +1054,65 @@ func responseBodySuffix(body []byte) string {
 	return ": " + string(body)
 }
 
-type temporaryDeliveryError struct {
-	err error
+type deliveryError struct {
+	err        error
+	category   chatbridge.DeliveryErrorCategory
+	retryable  bool
+	retryAfter time.Duration
 }
 
-func (e temporaryDeliveryError) Error() string {
+func newDeliveryError(err error, category chatbridge.DeliveryErrorCategory, retryable bool, retryAfter time.Duration) deliveryError {
+	return deliveryError{err: err, category: category, retryable: retryable, retryAfter: retryAfter}
+}
+
+func (e deliveryError) Error() string {
 	if e.err == nil {
-		return "temporary incident delivery error"
+		return "incident delivery error"
 	}
 	return e.err.Error()
 }
 
-func (e temporaryDeliveryError) Unwrap() error {
+func (e deliveryError) Unwrap() error {
 	return e.err
 }
 
 func isTemporaryDeliveryError(err error) bool {
-	var temporary temporaryDeliveryError
-	return errors.As(err, &temporary)
+	var deliveryErr deliveryError
+	return errors.As(err, &deliveryErr) && deliveryErr.retryable
+}
+
+func deliveryOutcomeFromError(err error) chatbridge.DeliveryOutcome {
+	if err == nil {
+		return chatbridge.DeliveredDeliveryOutcome()
+	}
+	var deliveryErr deliveryError
+	if errors.As(err, &deliveryErr) {
+		return chatbridge.DeliveryOutcome{
+			Delivered:  false,
+			Retryable: deliveryErr.retryable,
+			Category:   deliveryErr.category,
+			Summary:    chatbridge.SanitizeDeliveryMessage(deliveryErr.Error()),
+			RetryAfter: deliveryErr.retryAfter,
+		}
+	}
+	return chatbridge.PermanentDeliveryOutcome(chatbridge.DeliveryErrorConfiguration, err.Error())
+}
+
+// retryAfterDuration parses the Retry-After header as delta seconds or date.
+func retryAfterDuration(header http.Header) time.Duration {
+	value := strings.TrimSpace(header.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		if wait := time.Until(when); wait > 0 {
+			return wait
+		}
+	}
+	return 0
 }
 
 func (s *Service) withRetry(ctx context.Context, send func() (*providerDeliveryResult, error)) (*providerDeliveryResult, error) {

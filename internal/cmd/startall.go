@@ -147,9 +147,11 @@ func runStartAll(ctx *Context, _ []string) error {
 		NotificationStore:    stores.Notification,
 		NotificationState:    stores.NotificationState,
 		NewNotificationLease: stores.NewNotificationLease,
+		NotificationMonitorRegistry: stores.NotificationMonitorRegistry,
 		IncidentStore:        stores.Incident,
 		IncidentState:        stores.IncidentState,
 		NewIncidentLease:     stores.NewIncidentLease,
+		IncidentMonitorRegistry: stores.IncidentMonitorRegistry,
 	}
 
 	openCodeHost := opencodehost.New(signalCtx, ctx.Config.OpenCode)

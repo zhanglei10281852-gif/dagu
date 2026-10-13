@@ -6,6 +6,7 @@ package chatbridge
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -386,20 +387,34 @@ func TestNotificationMonitor_RestartRequeuesPersistedPending(t *testing.T) {
 		AttemptID: "attempt-1",
 		Error:     "boom",
 	}
-	state := newNotificationMonitorState()
-	state.Bootstrapped = true
-	state.Destinations["dest-1"] = &notificationDestinationState{
-		Pending: map[string]NotificationEvent{
-			NotificationSeenKey(status): {
-				Key:        NotificationSeenKey(status),
-				Status:     cloneNotificationStatus(status),
-				DAGFile:    "briefing-file",
-				ObservedAt: time.Now().UTC(),
+	observedAt := time.Now().UTC()
+	// Persist a real version-1 state file to prove lossless migration on restart.
+	v1Struct := struct {
+		Version      int                                      `json:"version"`
+		Bootstrapped bool                                     `json:"bootstrapped"`
+		SourceCursor eventstore.DAGRunCursor                  `json:"source_cursor"`
+		Destinations map[string]*notificationDestinationState `json:"destinations"`
+	}{
+		Version:      1,
+		Bootstrapped: true,
+		SourceCursor: eventstore.DAGRunCursor{},
+		Destinations: map[string]*notificationDestinationState{
+			"dest-1": {
+				Pending: map[string]NotificationEvent{
+					NotificationSeenKey(status): {
+						Key:        NotificationSeenKey(status),
+						Type:       eventstore.TypeDAGRunFailed,
+						Status:     cloneNotificationStatus(status),
+						DAGFile:    "briefing-file",
+						ObservedAt: observedAt,
+					},
+				},
 			},
 		},
-		Delivered: make(map[string]time.Time),
 	}
-	require.NoError(t, newNotificationStateStore(filemonitor.NewStateStore(stateFile)).Save(context.Background(), state))
+	v1State, err := json.Marshal(v1Struct)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(stateFile, v1State, 0o600))
 
 	var (
 		mu    sync.Mutex
@@ -487,7 +502,7 @@ func TestNotificationMonitor_BoundsFailedDeliveryBacklog(t *testing.T) {
 
 	result := newNotificationStateStore(filemonitor.NewStateStore(stateFile)).Load(context.Background())
 	require.NoError(t, result.Warning)
-	pending := result.State.Destinations["dest-1"].Pending
+	pending := pendingRecordsOf(result.State.Destinations["dest-1"])
 	require.Len(t, pending, 2)
 	assert.NotContains(t, pending, events[0].Key)
 	assert.Contains(t, pending, events[1].Key)
@@ -507,12 +522,11 @@ func TestNotificationMonitor_TrimsPersistedBacklogBeforeRequeue(t *testing.T) {
 	state := newNotificationMonitorState()
 	state.Bootstrapped = true
 	state.Destinations["dest-1"] = &notificationDestinationState{
-		Pending: map[string]NotificationEvent{
-			events[0].Key: events[0],
-			events[1].Key: events[1],
-			events[2].Key: events[2],
+		Records: map[string]*notificationDeliveryRecord{
+			events[0].Key: newPendingDeliveryRecord(events[0], base),
+			events[1].Key: newPendingDeliveryRecord(events[1], base),
+			events[2].Key: newPendingDeliveryRecord(events[2], base.Add(time.Second)),
 		},
-		Delivered: make(map[string]time.Time),
 	}
 	store := newNotificationStateStore(filemonitor.NewStateStore(stateFile))
 	require.NoError(t, store.Save(context.Background(), state))
@@ -535,7 +549,7 @@ func TestNotificationMonitor_TrimsPersistedBacklogBeforeRequeue(t *testing.T) {
 
 	result := store.Load(context.Background())
 	require.NoError(t, result.Warning)
-	pending := result.State.Destinations["dest-1"].Pending
+	pending := pendingRecordsOf(result.State.Destinations["dest-1"])
 	require.Len(t, pending, 2)
 	assert.NotContains(t, pending, "event-a")
 	assert.Contains(t, pending, "event-b")
@@ -964,10 +978,9 @@ func TestNotificationMonitor_MarkBatchDeliveredSaveFailureDoesNotMutateLiveState
 		ObservedAt: time.Now().UTC(),
 	}
 	monitor.state.Destinations["dest-1"] = &notificationDestinationState{
-		Pending: map[string]NotificationEvent{
-			event.Key: event,
+		Records: map[string]*notificationDeliveryRecord{
+			event.Key: newPendingDeliveryRecord(event, event.ObservedAt),
 		},
-		Delivered: make(map[string]time.Time),
 	}
 
 	require.NoError(t, os.Chmod(stateDir, 0o500))
@@ -984,11 +997,13 @@ func TestNotificationMonitor_MarkBatchDeliveredSaveFailureDoesNotMutateLiveState
 	defer monitor.stateMu.Unlock()
 	destState := monitor.state.Destinations["dest-1"]
 	require.NotNil(t, destState)
-	assert.Contains(t, destState.Pending, event.Key)
-	assert.Empty(t, destState.Delivered)
+	record := destState.Records[event.Key]
+	require.NotNil(t, record)
+	assert.Equal(t, DeliveryStatusPending, record.Status)
+	assert.Contains(t, pendingRecordsOf(destState), event.Key)
 }
 
-func TestNotificationMonitor_RemovedDestinationsArePurgedOnStartup(t *testing.T) {
+func TestNotificationMonitor_RemovedDestinationsDropPendingButRetainTerminalRecords(t *testing.T) {
 	t.Parallel()
 
 	stateFile := filepath.Join(t.TempDir(), "state.json")
@@ -1001,16 +1016,26 @@ func TestNotificationMonitor_RemovedDestinationsArePurgedOnStartup(t *testing.T)
 	}
 	state := newNotificationMonitorState()
 	state.Bootstrapped = true
+	now := time.Now().UTC()
+	deadRecord := &notificationDeliveryRecord{
+		Status:           DeliveryStatusDeadLetter,
+		Event:            &NotificationEvent{Key: "dead-key", Status: cloneNotificationStatus(status)},
+		Generation:       2,
+		Attempts:         3,
+		DeadLetterAt:     &now,
+		DeadLetterReason: deadLetterReasonClientError,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
 	state.Destinations["removed-dest"] = &notificationDestinationState{
-		Pending: map[string]NotificationEvent{
-			NotificationSeenKey(status): {
+		Records: map[string]*notificationDeliveryRecord{
+			NotificationSeenKey(status): newPendingDeliveryRecord(NotificationEvent{
 				Key:        NotificationSeenKey(status),
 				Status:     cloneNotificationStatus(status),
-				ObservedAt: time.Now().UTC(),
-			},
-		},
-		Delivered: map[string]time.Time{
-			NotificationSeenKey(status): time.Now().UTC(),
+				ObservedAt: now,
+			}, now),
+			"delivered-key": newDeliveredDeliveryRecord("delivered-key", now),
+			"dead-key":      deadRecord,
 		},
 	}
 	require.NoError(t, newNotificationStateStore(filemonitor.NewStateStore(stateFile)).Save(context.Background(), state))
@@ -1036,15 +1061,19 @@ func TestNotificationMonitor_RemovedDestinationsArePurgedOnStartup(t *testing.T)
 	require.Eventually(t, func() bool {
 		monitor.stateMu.Lock()
 		defer monitor.stateMu.Unlock()
-		_, removedExists := monitor.state.Destinations["removed-dest"]
 		_, keepExists := monitor.state.Destinations["keep-dest"]
-		return !removedExists && keepExists
+		return keepExists
 	}, notificationMonitorEventuallyTimeout(time.Second), 10*time.Millisecond)
 
 	result := newNotificationStateStore(filemonitor.NewStateStore(stateFile)).Load(context.Background())
 	require.NoError(t, result.Warning)
-	assert.NotContains(t, result.State.Destinations, "removed-dest")
+	// Terminal records are retained for inspection; the pending record is gone.
+	assert.Contains(t, result.State.Destinations, "removed-dest")
 	assert.Contains(t, result.State.Destinations, "keep-dest")
+	removed := result.State.Destinations["removed-dest"]
+	assert.NotContains(t, removed.Records, NotificationSeenKey(status))
+	assert.Contains(t, removed.Records, "delivered-key")
+	assert.Contains(t, removed.Records, "dead-key")
 
 	mu.Lock()
 	defer mu.Unlock()

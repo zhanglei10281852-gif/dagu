@@ -1,0 +1,16 @@
+--- FAIL: TestDeliveryController_RoutesRedriveToLeaseOwner (5.35s)
+    context_runner.go:35: timed out waiting for runner shutdown
+--- FAIL: TestNotificationMonitor_BoundsFailedDeliveryBacklog (4.63s)
+    context_runner.go:35: timed out waiting for runner shutdown
+FAIL
+FAIL	github.com/dagucloud/dagu/v2/internal/service/chatbridge	15.494s
+FAIL
+--- FAIL: TestMonitor_BackoffScheduleSurvivesRestart (6.21s)
+    delivery_lifecycle_test.go:450: 
+        	Error Trace:	F:/swe/098831/project-02/internal/service/chatbridge/delivery_lifecycle_test.go:450
+        	Error:      	Should be empty, but was [2026-10-13 19:13:35.292129 +0800 CST m=+3.771853001]
+        	Test:       	TestMonitor_BackoffScheduleSurvivesRestart
+        	Messages:   	record must not be retried before its persisted next attempt time
+FAIL
+FAIL	github.com/dagucloud/dagu/v2/internal/service/chatbridge	18.107s
+FAIL

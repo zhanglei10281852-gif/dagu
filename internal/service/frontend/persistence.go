@@ -38,9 +38,13 @@ type Stores struct {
 	Notification         notification.Store
 	NotificationState    chatbridge.StateStore
 	NewNotificationLease func() chatbridge.Lease
+	// NotificationMonitorRegistry routes redrives to the lease-owning monitor.
+	NotificationMonitorRegistry *chatbridge.MonitorRegistry
 	Incident             incident.Store
 	IncidentState        chatbridge.StateStore
 	NewIncidentLease     func() chatbridge.Lease
+	// IncidentMonitorRegistry routes incident redrives to the lease owner.
+	IncidentMonitorRegistry *chatbridge.MonitorRegistry
 	Workspace            workspace.Store
 	Upgrade              upgrade.CacheStore
 	Audit                audit.Store

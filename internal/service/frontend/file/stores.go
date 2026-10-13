@@ -241,6 +241,7 @@ func initEncryptedStores(ctx context.Context, cfg *config.Config, backend persis
 		stateFile := filepath.Join(cfg.Paths.DataDir, "notifications", "monitor-state.json")
 		stores.NotificationState = filemonitor.NewStateStore(stateFile)
 		stores.NewNotificationLease = newMonitorLease(stateFile)
+		stores.NotificationMonitorRegistry = chatbridge.NewMonitorRegistry()
 	}
 
 	incidentStore, err := persisfile.NewIncidentStore(
@@ -254,6 +255,7 @@ func initEncryptedStores(ctx context.Context, cfg *config.Config, backend persis
 		stateFile := filepath.Join(cfg.Paths.DataDir, "incidents", "monitor-state.json")
 		stores.IncidentState = filemonitor.NewStateStore(stateFile)
 		stores.NewIncidentLease = newMonitorLease(stateFile)
+		stores.IncidentMonitorRegistry = chatbridge.NewMonitorRegistry()
 	}
 }
 

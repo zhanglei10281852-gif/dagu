@@ -114,8 +114,12 @@ type Server struct {
 	notificationService  *notificationservice.Service
 	incidentState        chatbridge.StateStore
 	newIncidentLease     func() chatbridge.Lease
+	incidentRegistry     *chatbridge.MonitorRegistry
+	incidentMonitor      *chatbridge.NotificationMonitor
 	notificationState    chatbridge.StateStore
 	newNotificationLease func() chatbridge.Lease
+	notificationRegistry *chatbridge.MonitorRegistry
+	notificationMonitor  *chatbridge.NotificationMonitor
 	syncService          gitsync.Service
 	listener             net.Listener
 	appStream            *sse.AppStreamService
@@ -584,8 +588,10 @@ func NewServer(setup ServerConfig, opts ...ServerOption) (*Server, error) {
 		notificationService:  notificationSvc,
 		incidentState:        stores.IncidentState,
 		newIncidentLease:     stores.NewIncidentLease,
+		incidentRegistry:     stores.IncidentMonitorRegistry,
 		notificationState:    stores.NotificationState,
 		newNotificationLease: stores.NewNotificationLease,
+		notificationRegistry: stores.NotificationMonitorRegistry,
 		syncService:          syncSvc,
 		metricsRegistry:      mr,
 		dagRepository:        dr,
@@ -686,6 +692,15 @@ func NewServer(setup ServerConfig, opts ...ServerOption) (*Server, error) {
 	if srv.licenseManager != nil {
 		apiOpts = append(apiOpts, apiv1.WithLicenseManager(srv.licenseManager))
 	}
+
+	// Delivery lifecycle controllers resolve monitors lazily at request time
+	// because monitors are started after server construction.
+	apiOpts = append(apiOpts, apiv1.WithNotificationDeliveryController(func() apiv1.DeliveryManagementService {
+		return srv.NotificationDeliveryController()
+	}))
+	apiOpts = append(apiOpts, apiv1.WithIncidentDeliveryController(func() apiv1.DeliveryManagementService {
+		return srv.IncidentDeliveryController()
+	}))
 
 	allAPIOptions := append(apiOpts, srv.tunnelAPIOpts...)
 
@@ -944,27 +959,27 @@ func trustedProxyRequestHeaders(cfg config.AuthTrustedProxy) []string {
 }
 
 func (srv *Server) startMonitors(ctx context.Context) error {
-	notificationMonitor := srv.newNotificationMonitor()
-	incidentMonitor := srv.newIncidentMonitor()
+	srv.notificationMonitor = srv.newNotificationMonitor()
+	srv.incidentMonitor = srv.newIncidentMonitor()
 
-	if notificationMonitor != nil {
-		if err := notificationMonitor.Bootstrap(ctx); err != nil {
+	if srv.notificationMonitor != nil {
+		if err := srv.notificationMonitor.Bootstrap(ctx); err != nil {
 			return fmt.Errorf("bootstrap notification monitor: %w", err)
 		}
 	}
 
-	if incidentMonitor != nil {
-		if err := incidentMonitor.Bootstrap(ctx); err != nil {
+	if srv.incidentMonitor != nil {
+		if err := srv.incidentMonitor.Bootstrap(ctx); err != nil {
 			return fmt.Errorf("bootstrap incident monitor: %w", err)
 		}
 	}
 
-	if notificationMonitor != nil {
-		go notificationMonitor.Run(ctx)
+	if srv.notificationMonitor != nil {
+		go srv.notificationMonitor.Run(ctx)
 	}
 
-	if incidentMonitor != nil {
-		go incidentMonitor.Run(ctx)
+	if srv.incidentMonitor != nil {
+		go srv.incidentMonitor.Run(ctx)
 	}
 	return nil
 }
@@ -980,14 +995,18 @@ func (srv *Server) newNotificationMonitor() *chatbridge.NotificationMonitor {
 	if srv.newNotificationLease != nil {
 		lease = srv.newNotificationLease()
 	}
-	return chatbridge.NewNotificationMonitor(
+	monitorCfg := chatbridge.DefaultNotificationMonitorConfig()
+	applyNotificationDeliveryConfig(&monitorCfg, srv.config)
+	monitor := chatbridge.NewNotificationMonitor(
 		srv.eventService,
 		srv.notificationState,
 		lease,
 		srv.notificationService,
 		slog.Default(),
-		chatbridge.DefaultNotificationMonitorConfig(),
+		monitorCfg,
 	)
+	monitor.SetRegistry(srv.notificationRegistry)
+	return monitor
 }
 
 func (srv *Server) newIncidentMonitor() *chatbridge.NotificationMonitor {
@@ -1001,14 +1020,18 @@ func (srv *Server) newIncidentMonitor() *chatbridge.NotificationMonitor {
 	if srv.newIncidentLease != nil {
 		lease = srv.newIncidentLease()
 	}
-	return chatbridge.NewNotificationMonitor(
+	monitorCfg := incidentMonitorConfig()
+	applyNotificationDeliveryConfig(&monitorCfg, srv.config)
+	monitor := chatbridge.NewNotificationMonitor(
 		srv.eventService,
 		srv.incidentState,
 		lease,
 		srv.incidentService,
 		slog.Default(),
-		incidentMonitorConfig(),
+		monitorCfg,
 	)
+	monitor.SetRegistry(srv.incidentRegistry)
+	return monitor
 }
 
 func incidentMonitorConfig() chatbridge.NotificationMonitorConfig {
@@ -1021,6 +1044,33 @@ func incidentMonitorConfig() chatbridge.NotificationMonitorConfig {
 		eventstore.TypeDAGRunPartiallySucceeded,
 	}
 	return cfg
+}
+
+func applyNotificationDeliveryConfig(monitorCfg *chatbridge.NotificationMonitorConfig, cfg *config.Config) {
+	delivery := cfg.Notification.Delivery
+	monitorCfg.MaxDeliveryAttempts = delivery.MaxAttempts
+	monitorCfg.DeliveryInitialBackoff = delivery.InitialBackoff
+	monitorCfg.DeliveryMaxBackoff = delivery.MaxBackoff
+	monitorCfg.DeadLetterTTL = delivery.DeadLetterTTL
+	monitorCfg.DeadLetterLimit = delivery.DeadLetterLimit
+}
+
+// NotificationDeliveryController exposes list/detail/redrive management for
+// notification deliveries. It returns nil when notifications are unavailable.
+func (srv *Server) NotificationDeliveryController() *chatbridge.DeliveryController {
+	if srv.notificationMonitor == nil {
+		return nil
+	}
+	return chatbridge.NewDeliveryController(srv.notificationMonitor, srv.notificationRegistry)
+}
+
+// IncidentDeliveryController exposes list/detail/redrive management for
+// incident deliveries. It returns nil when incidents are unavailable.
+func (srv *Server) IncidentDeliveryController() *chatbridge.DeliveryController {
+	if srv.incidentMonitor == nil {
+		return nil
+	}
+	return chatbridge.NewDeliveryController(srv.incidentMonitor, srv.incidentRegistry)
 }
 
 // startPeriodicUpdateCheck runs an initial update check and then repeats

@@ -1,0 +1,22 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: "每个事件与 destination 的生产投递记录持久保存尝试次数、脱敏错误类别与摘要、最近/下次尝试时间，并能通过受权限保护的分页 API 和通知页面按状态查看。"
+  - id: 2
+    type: f2p
+    text: "429、5xx 和网络故障按持久退避重试，进程重启或 monitor lease 接管不会重置尝试次数、形成热循环或提前确认事件。"
+  - id: 3
+    type: f2p
+    text: "确定的永久错误立即进入 dead-letter，临时错误达到配置上限后也进入该终态；两者停止自动发送且不占用活动 pending 容量。"
+  - id: 4
+    type: f2p
+    text: "修复 destination 后可重驱选定 dead-letter；并发或重复请求最多创建一个新的 pending 代际，送达、已重驱、缺失记录均返回稳定且不重复事件的结果。"
+  - id: 5
+    type: f2p
+    text: "一个 destination 持续失败、进入终态或被人工重驱时，其他 destination 的批处理、确认和送达独立推进，不受其错误或容量占用阻塞。"
+  - id: 6
+    type: f2p
+    text: "投递结果后的持久化失败不会把 pending 错误标为 delivered 或 dead-letter；恢复存储或 lease 接管后仍可按原记录继续处理。"
+  - id: 7
+    type: p2p
+    text: "旧版 monitor state 可兼容迁移，现有事件 cursor、批处理窗口、路由/去重、channel test、凭据隐藏和正常 destination 的投递行为不回归。"

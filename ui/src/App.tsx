@@ -78,6 +78,12 @@ const LicensePage = React.lazy(() => import('./pages/license'));
 const NotificationChannelsPage = React.lazy(
   () => import('./pages/notification-channels')
 );
+const NotificationDeliveriesPage = React.lazy(
+  () => import('./pages/deliveries/NotificationDeliveriesPage')
+);
+const IncidentDeliveriesPage = React.lazy(
+  () => import('./pages/deliveries/IncidentDeliveriesPage')
+);
 const NotificationRulesPage = React.lazy(
   () => import('./pages/notification-rules')
 );
@@ -696,10 +702,26 @@ function AppInner({ config: initialConfig }: Props): React.ReactElement {
                                         }
                                       />
                                       <Route
+                                        path="/notification-deliveries"
+                                        element={
+                                          <DeveloperElement>
+                                            <NotificationDeliveriesPage />
+                                          </DeveloperElement>
+                                        }
+                                      />
+                                      <Route
                                         path="/incidents"
                                         element={
                                           <ActiveLicenseDeveloperElement>
                                             <IncidentsPage />
+                                          </ActiveLicenseDeveloperElement>
+                                        }
+                                      />
+                                      <Route
+                                        path="/incident-deliveries"
+                                        element={
+                                          <ActiveLicenseDeveloperElement>
+                                            <IncidentDeliveriesPage />
                                           </ActiveLicenseDeveloperElement>
                                         }
                                       />

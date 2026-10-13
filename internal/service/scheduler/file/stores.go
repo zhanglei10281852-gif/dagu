@@ -90,6 +90,7 @@ func initMonitorStores(ctx context.Context, cfg *config.Config, backend persis.B
 		stateFile := filepath.Join(cfg.Paths.DataDir, "notifications", "monitor-state.json")
 		deps.NotificationState = filemonitor.NewStateStore(stateFile)
 		deps.NewNotificationLease = newMonitorLease(stateFile)
+		deps.NotificationMonitorRegistry = chatbridge.NewMonitorRegistry()
 	}
 
 	incidentStore, err := persisfile.NewIncidentStore(
@@ -103,6 +104,7 @@ func initMonitorStores(ctx context.Context, cfg *config.Config, backend persis.B
 		stateFile := filepath.Join(cfg.Paths.DataDir, "incidents", "monitor-state.json")
 		deps.IncidentState = filemonitor.NewStateStore(stateFile)
 		deps.NewIncidentLease = newMonitorLease(stateFile)
+		deps.IncidentMonitorRegistry = chatbridge.NewMonitorRegistry()
 	}
 }
 

@@ -5812,6 +5812,328 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /notification-deliveries:
+    get:
+      summary: "List notification delivery records"
+      description: "Returns paginated notification delivery lifecycle records (pending, delivered, and dead-lettered). Developer, manager, or admin only."
+      operationId: "listNotificationDeliveries"
+      tags:
+        - "notifications"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - name: "status"
+          in: "query"
+          required: false
+          description: "Filter by lifecycle status. Repeat the parameter or pass a comma-separated list."
+          schema:
+            type: "array"
+            items:
+              type: "string"
+              enum: ["pending", "delivered", "dead_letter"]
+          style: "form"
+          explode: true
+        - name: "destination"
+          in: "query"
+          required: false
+          description: "Exact destination identifier to filter by."
+          schema:
+            type: "string"
+        - name: "cursor"
+          in: "query"
+          required: false
+          description: "Opaque pagination cursor returned by a previous call."
+          schema:
+            type: "string"
+        - name: "limit"
+          in: "query"
+          required: false
+          description: "Page size (default 50, maximum 200)."
+          schema:
+            type: "integer"
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: "Page of notification delivery records"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationDeliveryListResponse"
+        "400":
+          description: "Invalid filter or pagination cursor"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: "Forbidden - insufficient permissions"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /notification-deliveries/redrive:
+    post:
+      summary: "Redrive dead-lettered notification deliveries"
+      description: |
+        Reopens the selected dead-lettered records as a fresh pending generation
+        and queues them for immediate delivery. Records that are already pending
+        or delivered, or that no longer exist, return a stable per-record outcome
+        without being duplicated. Redrive is executed by the monitor instance
+        that currently owns the delivery lease. Developer, manager, or admin only.
+      operationId: "redriveNotificationDeliveries"
+      tags:
+        - "notifications"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotificationDeliveryRedriveRequest"
+      responses:
+        "200":
+          description: "Per-record redrive outcomes"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationDeliveryRedriveResponse"
+        "400":
+          description: "Invalid request or record id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: "Forbidden - insufficient permissions"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: "No delivery controller is active on this process"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /notification-deliveries/{recordId}:
+    get:
+      summary: "Get a notification delivery record"
+      description: "Returns a single notification delivery record by its opaque id. Developer, manager, or admin only."
+      operationId: "getNotificationDelivery"
+      tags:
+        - "notifications"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - name: "recordId"
+          in: "path"
+          required: true
+          description: "Opaque delivery record id."
+          schema:
+            type: "string"
+      responses:
+        "200":
+          description: "Notification delivery record"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationDeliveryRecord"
+        "403":
+          description: "Forbidden - insufficient permissions"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "Record not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /incident-deliveries:
+    get:
+      summary: "List incident delivery records"
+      description: "Returns paginated incident delivery lifecycle records (pending, delivered, and dead-lettered). Incident management requires an active Dagu license or trial. Developer, manager, or admin only."
+      operationId: "listIncidentDeliveries"
+      tags:
+        - "incidents"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - name: "status"
+          in: "query"
+          required: false
+          description: "Filter by lifecycle status. Repeat the parameter or pass a comma-separated list."
+          schema:
+            type: "array"
+            items:
+              type: "string"
+              enum: ["pending", "delivered", "dead_letter"]
+          style: "form"
+          explode: true
+        - name: "destination"
+          in: "query"
+          required: false
+          description: "Exact destination identifier to filter by."
+          schema:
+            type: "string"
+        - name: "cursor"
+          in: "query"
+          required: false
+          description: "Opaque pagination cursor returned by a previous call."
+          schema:
+            type: "string"
+        - name: "limit"
+          in: "query"
+          required: false
+          description: "Page size (default 50, maximum 200)."
+          schema:
+            type: "integer"
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: "Page of incident delivery records"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentDeliveryListResponse"
+        "400":
+          description: "Invalid filter or pagination cursor"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: "Forbidden - requires an active Dagu license or trial"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /incident-deliveries/redrive:
+    post:
+      summary: "Redrive dead-lettered incident deliveries"
+      description: |
+        Reopens the selected dead-lettered incident delivery records as a fresh
+        pending generation and queues them for immediate delivery. Records that
+        are already pending or delivered, or that no longer exist, return a
+        stable per-record outcome without duplication. Redrive is executed by
+        the monitor instance that currently owns the delivery lease. Incident
+        management requires an active Dagu license or trial. Developer, manager,
+        or admin only.
+      operationId: "redriveIncidentDeliveries"
+      tags:
+        - "incidents"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IncidentDeliveryRedriveRequest"
+      responses:
+        "200":
+          description: "Per-record redrive outcomes"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentDeliveryRedriveResponse"
+        "400":
+          description: "Invalid request or record id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: "Forbidden - requires an active Dagu license or trial"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: "No delivery controller is active on this process"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /incident-deliveries/{recordId}:
+    get:
+      summary: "Get an incident delivery record"
+      description: "Returns a single incident delivery record by its opaque id. Incident management requires an active Dagu license or trial. Developer, manager, or admin only."
+      operationId: "getIncidentDelivery"
+      tags:
+        - "incidents"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - name: "recordId"
+          in: "path"
+          required: true
+          description: "Opaque delivery record id."
+          schema:
+            type: "string"
+      responses:
+        "200":
+          description: "Incident delivery record"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationDeliveryRecord"
+        "403":
+          description: "Forbidden - requires an active Dagu license or trial"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "Record not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /incident-providers:
     get:
       summary: "List incident providers"
@@ -13028,6 +13350,186 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/NotificationChannel"
+
+    NotificationDeliveryStatus:
+      type: string
+      description: "Lifecycle status of one event delivery to one destination."
+      enum: ["pending", "delivered", "dead_letter"]
+
+    NotificationDeliveryErrorCategory:
+      type: string
+      description: "Classified reason for the most recent delivery failure."
+      enum: ["rate_limited", "server_error", "network", "client_error", "configuration", "unknown"]
+
+    NotificationDeliveryRedriveOutcome:
+      type: string
+      description: "Stable result of a redrive request for one record."
+      enum: ["redriven", "already_pending", "delivered", "not_found"]
+
+    NotificationDeliveryRecord:
+      type: object
+      description: "One event's delivery lifecycle record for one destination."
+      required:
+        - recordId
+        - destination
+        - eventKey
+        - status
+        - attempts
+        - generation
+        - createdAt
+        - updatedAt
+      properties:
+        recordId:
+          type: string
+          description: "Opaque id for detail/redrive calls."
+        destination:
+          type: string
+          description: "Internal destination identifier."
+        eventKey:
+          type: string
+        dagName:
+          type: string
+        dagRunId:
+          type: string
+        attemptId:
+          type: string
+        eventType:
+          type: string
+        runStatus:
+          type: integer
+        dagFile:
+          type: string
+        observedAt:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          $ref: "#/components/schemas/NotificationDeliveryStatus"
+        attempts:
+          type: integer
+          description: "Automatic delivery attempts recorded."
+        generation:
+          type: integer
+          description: "Incremented each time the record is (re)opened as pending."
+        lastErrorCategory:
+          $ref: "#/components/schemas/NotificationDeliveryErrorCategory"
+        lastErrorSummary:
+          type: string
+          description: "Short credential-free failure summary."
+        lastAttemptAt:
+          type: string
+          format: date-time
+          nullable: true
+        nextAttemptAt:
+          type: string
+          format: date-time
+          nullable: true
+        deliveredAt:
+          type: string
+          format: date-time
+          nullable: true
+        deadLetterAt:
+          type: string
+          format: date-time
+          nullable: true
+        deadLetterReason:
+          type: string
+          description: "client_error, configuration, or attempt_limit."
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    NotificationDeliveryListResponse:
+      type: object
+      required:
+        - records
+      properties:
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationDeliveryRecord"
+        nextCursor:
+          type: string
+          nullable: true
+          description: "Opaque cursor for the next page; empty when no more records exist."
+
+    NotificationDeliveryRedriveRequest:
+      type: object
+      required:
+        - recordIds
+      properties:
+        recordIds:
+          type: array
+          description: "Opaque record ids to redrive."
+          minItems: 1
+          maxItems: 200
+          items:
+            type: string
+
+    NotificationDeliveryRedriveResult:
+      type: object
+      required:
+        - recordId
+        - outcome
+        - status
+        - generation
+      properties:
+        recordId:
+          type: string
+        outcome:
+          $ref: "#/components/schemas/NotificationDeliveryRedriveOutcome"
+        status:
+          $ref: "#/components/schemas/NotificationDeliveryStatus"
+        generation:
+          type: integer
+
+    NotificationDeliveryRedriveResponse:
+      type: object
+      required:
+        - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationDeliveryRedriveResult"
+
+    IncidentDeliveryListResponse:
+      type: object
+      required:
+        - records
+      properties:
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationDeliveryRecord"
+        nextCursor:
+          type: string
+          nullable: true
+
+    IncidentDeliveryRedriveRequest:
+      type: object
+      required:
+        - recordIds
+      properties:
+        recordIds:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            type: string
+
+    IncidentDeliveryRedriveResponse:
+      type: object
+      required:
+        - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationDeliveryRedriveResult"
 
     NotificationSubscriptionInput:
       type: object

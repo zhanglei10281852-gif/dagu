@@ -94,8 +94,9 @@ type Definition struct {
 	Cache      *string        `mapstructure:"cache"`   // "low", "normal", or "high"
 	Terminal   *TerminalDef   `mapstructure:"terminal"`
 	Audit      *AuditDef      `mapstructure:"audit"`
-	EventStore *EventStoreDef `mapstructure:"event_store"`
-	Webhooks   *WebhooksDef   `mapstructure:"webhooks"`
+	EventStore   *EventStoreDef   `mapstructure:"event_store"`
+	Notification *NotificationDef `mapstructure:"notification"`
+	Webhooks     *WebhooksDef     `mapstructure:"webhooks"`
 	SSE        *SSEDef        `mapstructure:"sse"`
 	GitSync    *GitSyncDef    `mapstructure:"git_sync"`
 	Tunnel     *TunnelDef     `mapstructure:"tunnel"`
@@ -485,6 +486,21 @@ type AuditDef struct {
 type EventStoreDef struct {
 	Enabled       *bool `mapstructure:"enabled"`        // Default: true
 	RetentionDays *int  `mapstructure:"retention_days"` // Default: 1
+}
+
+// NotificationDef configures notification/incident delivery behavior.
+type NotificationDef struct {
+	Delivery *NotificationDeliveryDef `mapstructure:"delivery"`
+}
+
+// NotificationDeliveryDef mirrors NotificationDeliveryConfig with optional
+// YAML-provided values; durations are strings such as "30s" or "1h".
+type NotificationDeliveryDef struct {
+	MaxAttempts    *int    `mapstructure:"max_attempts"`
+	InitialBackoff *string `mapstructure:"initial_backoff"`
+	MaxBackoff     *string `mapstructure:"max_backoff"`
+	DeadLetterTTL  *string `mapstructure:"dead_letter_ttl"`
+	DeadLetterLimit *int   `mapstructure:"dead_letter_limit"`
 }
 
 // WebhooksDef configures webhook trigger endpoints.

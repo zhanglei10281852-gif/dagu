@@ -26,14 +26,18 @@ func newNotificationMonitor(cfg *config.Config, deps Dependencies) *chatbridge.N
 		lease = deps.NewNotificationLease()
 	}
 	service := newNotificationService(cfg, deps.NotificationStore, deps.DAGRepository)
-	return chatbridge.NewNotificationMonitor(
+	monitorCfg := chatbridge.DefaultNotificationMonitorConfig()
+	applyDeliveryConfig(&monitorCfg, cfg)
+	monitor := chatbridge.NewNotificationMonitor(
 		deps.EventService,
 		deps.NotificationState,
 		lease,
 		service,
 		slog.Default(),
-		chatbridge.DefaultNotificationMonitorConfig(),
+		monitorCfg,
 	)
+	monitor.SetRegistry(deps.NotificationMonitorRegistry)
+	return monitor
 }
 
 func newNotificationService(
@@ -75,7 +79,8 @@ func newIncidentMonitor(cfg *config.Config, deps Dependencies) *chatbridge.Notif
 		eventstore.TypeDAGRunSucceeded,
 		eventstore.TypeDAGRunPartiallySucceeded,
 	}
-	return chatbridge.NewNotificationMonitor(
+	applyDeliveryConfig(&monitorConfig, cfg)
+	monitor := chatbridge.NewNotificationMonitor(
 		deps.EventService,
 		deps.IncidentState,
 		lease,
@@ -83,4 +88,18 @@ func newIncidentMonitor(cfg *config.Config, deps Dependencies) *chatbridge.Notif
 		slog.Default(),
 		monitorConfig,
 	)
+	monitor.SetRegistry(deps.IncidentMonitorRegistry)
+	return monitor
+}
+
+// applyDeliveryConfig maps user-configured delivery lifecycle settings onto a
+// monitor config. Zero values stay zero so chatbridge normalization applies
+// the built-in defaults.
+func applyDeliveryConfig(monitorCfg *chatbridge.NotificationMonitorConfig, cfg *config.Config) {
+	delivery := cfg.Notification.Delivery
+	monitorCfg.MaxDeliveryAttempts = delivery.MaxAttempts
+	monitorCfg.DeliveryInitialBackoff = delivery.InitialBackoff
+	monitorCfg.DeliveryMaxBackoff = delivery.MaxBackoff
+	monitorCfg.DeadLetterTTL = delivery.DeadLetterTTL
+	monitorCfg.DeadLetterLimit = delivery.DeadLetterLimit
 }

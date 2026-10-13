@@ -26,6 +26,7 @@ type Config struct {
 	Browser         BrowserConfig
 	Server          Server
 	EventStore      EventStoreConfig
+	Notification    NotificationConfig
 	Webhooks        WebhooksConfig
 	Paths           PathsConfig
 	DAGDiscovery    DAGDiscoveryConfig
@@ -299,6 +300,29 @@ type AuditConfig struct {
 type EventStoreConfig struct {
 	Enabled       bool // Default: true
 	RetentionDays int  // Default: 1; 0 = keep forever
+}
+
+// NotificationConfig contains configuration for notification/incident
+// delivery monitors.
+type NotificationConfig struct {
+	Delivery NotificationDeliveryConfig
+}
+
+// NotificationDeliveryConfig controls persistent retry/backoff and dead
+// -letter retention for one event's delivery to one destination.
+type NotificationDeliveryConfig struct {
+	// MaxAttempts bounds automatic attempts before a record dead-letters.
+	// Default: 10.
+	MaxAttempts int
+	// InitialBackoff is the wait after the first failed attempt; the wait
+	// doubles on each failure up to MaxBackoff. Defaults: 30s / 1h.
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+	// DeadLetterTTL bounds how long dead-lettered records remain visible
+	// (default 14d) and DeadLetterLimit bounds their count per destination
+	// (default 1000).
+	DeadLetterTTL   time.Duration
+	DeadLetterLimit int
 }
 
 // WebhooksConfig contains configuration for webhook trigger endpoints.
@@ -764,6 +788,9 @@ func (c *Config) Validate() error {
 	if err := c.validateEventStore(); err != nil {
 		return err
 	}
+	if err := c.validateNotification(); err != nil {
+		return err
+	}
 	if err := c.validateWebhooks(); err != nil {
 		return err
 	}
@@ -818,6 +845,20 @@ func (c *Config) validateScheduler() error {
 func (c *Config) validateEventStore() error {
 	if c.EventStore.RetentionDays < 0 {
 		return fmt.Errorf("event_store.retention_days must be >= 0")
+	}
+	return nil
+}
+
+func (c *Config) validateNotification() error {
+	delivery := c.Notification.Delivery
+	if delivery.MaxAttempts < 0 {
+		return fmt.Errorf("notification.delivery.max_attempts must be >= 0")
+	}
+	if delivery.DeadLetterLimit < 0 {
+		return fmt.Errorf("notification.delivery.dead_letter_limit must be >= 0")
+	}
+	if delivery.InitialBackoff < 0 || delivery.MaxBackoff < 0 || delivery.DeadLetterTTL < 0 {
+		return fmt.Errorf("notification.delivery backoff and dead_letter_ttl must be >= 0")
 	}
 	return nil
 }

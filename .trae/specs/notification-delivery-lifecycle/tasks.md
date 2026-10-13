@@ -1,0 +1,192 @@
+# 通知投递生命周期可观测性与死信重驱 - 实施计划
+
+## Task 1: 状态模型 v2 与 v1 无损迁移
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: None
+- **Description**:
+  - 在 `internal/service/chatbridge`（新文件 `delivery_records.go` 与 `monitor_state.go`）定义投递记录类型：状态枚举（pending/delivered/dead_letter）、错误类别枚举（rate_limited/server_error/network/client_error/configuration/unknown）、`notificationDeliveryRecord`（事件快照/紧凑摘要、attempts、generation、lastErrorCategory/Summary、lastAttemptAt、nextAttemptAt、deliveredAt、deadLetterAt、deadLetterReason、createdAt、updatedAt）。
+  - 将 `notificationDestinationState` 演进为 v2 `Records map[string]*notificationDeliveryRecord`；`notificationMonitorStateVersion = 2`；解码接受 v1（含 0）并无损迁移：Pending→pending 记录（attempts=0、无 nextAttemptAt、保留完整事件），Delivered→delivered 记录（key+deliveredAt，事件摘要缺省）。
+  - 更新 `normalize`、`cloneNotificationMonitorState`、所有构造点（`newNotificationMonitorState`、`ensureDestinations`、`destinationState`）；v2 保存时不再写旧 Pending/Delivered 字段。
+  - 用 v1 JSON fixture 做迁移测试；现有直接操作 Pending/Delivered 的辅助函数（enqueue/reconcile/migrateWaiting/trim/evict/IsDelivered 等）在本任务内暂以兼容垫片维持编译，后续 Task 3 重写。
+- **Acceptance Criteria Addressed**: AC-1, AC-15
+- **Test Requirements**:
+  - `rule` TR-1.1: v1 fixture（含 pending 事件、delivered 时间戳、nil maps、version 缺失）解码后字段与预期逐一一致，且再次编码为 v2 后信息无损；证据：`go test ./internal/service/chatbridge/ -run State`。
+  - `rule` TR-1.2: clone 对 records（含完整状态快照）做深拷贝，修改 clone 不影响原状态；证据：同包单测。
+  - `rule` TR-1.3: `version=3` 等不支持版本仍返回错误并走 quarantine 路径；证据：`monitor_state_test.go`。
+- **Notes**: 先写迁移测试再改实现（回归优先）。
+- **Completion Evidence**:
+  - TR-1.1 pass：`delivery_records_test.go::TestDecodeNotificationMonitorState_MigratesV1Losslessly`/`MissingVersionIsAccepted`/`TestSaveBumpsV1StateToV2` 通过；v1 pending/delivered 经真实 JSON 往返断言（含 cursor/bootstrapped/完整事件快照/送达时间），v2 编码不再含旧表。
+  - TR-1.2 pass：`TestCloneNotificationMonitorState_DeepCopiesRecords` 通过（event/summary/时间指针互不影响）。
+  - TR-1.3 pass：既有 `TestNotificationStateStore_LoadUnsupportedVersionQuarantinesState`（version=99）仍通过。
+  - 全部既有 chatbridge 测试迁移到记录模型后通过；`go test -race -count=2 ./internal/service/chatbridge/...` 绿；`go build ./...` 绿。
+
+## Task 2: transport 投递详细结果：错误分类与脱敏
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: None
+- **Description**:
+  - 在 `chatbridge` 定义可选接口 `DetailedNotificationTransport`（如 `FlushNotificationBatchWithResult(ctx, destination, batch, allowLLM) DeliveryOutcome`）与 `DeliveryOutcome{Delivered, Retryable, Category, Summary, RetryAfter}`；不改动 `NotificationTransport` 既有签名。
+  - `internal/service/notification/service.go`：扩展 `temporaryDeliveryError` 携带错误类别（rate_limited/server_error/network/client_error/configuration/unknown）；`deliverRequest` 分类 429（解析 `Retry-After` 秒数/HTTP 日期）、5xx、408→可重试，其余 4xx→client_error；`http.Do` 错误→network；本地校验（SSRF/scheme/未配置/模板/不支持 provider）→configuration；存储加载等内部错误→unknown+可重试（维持现有 false 语义）。
+  - 新增脱敏工具（notification 与 incident 共用，放 `internal/cmn` 或 chatbridge 导出）：从 `url.Error` 剥离 URL 仅留 OpError（主机/操作），正则清除 Telegram bot token、Bearer/Basic、`token=`、URL userinfo 等；响应体截断沿用 512 字节并整体过脱敏；摘要总长度加上界。
+  - 重构 `FlushNotificationBatch` 内部路径统一返回 outcome，bool 方法委托保持签名；`internal/service/incident/service.go` 做同构改造（其 deliverRequest 等价路径）。
+  - Teams 200 响应体 429 保持可重试并归类 rate_limited。
+- **Acceptance Criteria Addressed**: AC-7, AC-15
+- **Test Requirements**:
+  - `rule` TR-2.1: httptest 模拟 429（含 Retry-After）/503/408/404/400 与网络层失败，断言 outcome 的 Delivered/Retryable/Category/RetryAfter；证据：两个 service 包测试。
+  - `rule` TR-2.2: 在 URL 与响应体中植入已知 token（Telegram bot token、Bearer、?token=、webhook 路径密钥），断言 Summary 不含任一原文字段子串；证据：脱敏单测。
+  - `rule` TR-2.3: 未实现新接口的旧 transport 在 monitor 中仍按 bool 工作（失败=可重试/unknown）；证据：chatbridge fake transport 测试（Task 3 落地）。
+- **Notes**: 不改变 withRetry 的即时重试行为与次数。
+- **Completion Evidence**:
+  - TR-2.1 pass：`notification/delivery_outcome_test.go` 覆盖 429(+Retry-After 秒/HTTP-date)/503/408/404/400/401、Teams 200 体 429；`incident/delivery_outcome_test.go` 同构覆盖。分类、Retryable、RetryAfter 断言通过。
+  - TR-2.2 pass：Telegram bot token URL、Slack 路径密钥、Bearer/Basic、token 查询参数、URL userinfo 均在摘要中子串不存在（chatbridge `delivery_outcome_test.go` + 两 transport 网络失败测试）。
+  - TR-2.3：bool-only 旧 transport 的回退在 Task 3 引擎测试中由现有 `fakeNotificationTransport` 全部用例覆盖。
+  - `go test ./internal/service/chatbridge/ ./internal/service/notification/ ./internal/service/incident/ -count=1` 全绿；`go build ./...` 绿。
+
+## Task 3: monitor 生命周期引擎（尝试/退避/死信/清理/隔离）
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: Task 1, Task 2
+- **Description**:
+  - 在 `NotificationMonitorConfig` 增加 MaxDeliveryAttempts、DeliveryInitialBackoff、DeliveryMaxBackoff、DeadLetterTTL、DeadLetterLimit 及默认常量（10、30s、1h、14d、1000），normalize 兜底；退避计算复用 `internal/cmn/backoff` 并加抖动。
+  - 入队/路由/去重改为基于 records：`enqueueNotifications*` 写 pending 记录（generation=1、createdAt/updatedAt）；delivered TTL 去重与 waiting legacy 迁移、run 级替换/抑制语义保持等价。
+  - 投递路径：`flushPendingBatch` 优先用详细接口取 outcome；成功（含 policy 抑制 ack）→ delivered（写 deliveredAt、保留紧凑摘要、释放完整快照）；失败→对批次内仍 pending 的记录记一次尝试：可重试且未达上限→更新 attempts/last*/category/summary/nextAttemptAt（指数退避，RetryAfter 取大值，含抖动）；不可重试→dead_letter(client_error/configuration)；达到上限→dead_letter(attempt_limit)。
+  - `requeuePending` 与 session 初始化仅入队 nextAttemptAt 为空/到期的记录；未到期跳过；关停 drain 路径同样记录失败结果。
+  - `trimPendingNotifications` 只统计 pending；eviction 周期同时清理：delivered 过 SeenTTL、dead_letter 过 DeadLetterTTL 且每 destination 超 DeadLetterLimit 淘汰最旧；全部经状态事务持久化。
+  - `reconcileDestinations`：删除 destination 时丢弃其 pending（含 batcher discard），但保留终态记录至自然清理。
+  - 全部变更走 `applyStateTransitionLocked`（先持久化后改内存/动 batcher）；落盘失败时不得确认/入队/改代际；锁丢失 fence 保持。
+  - 重写 Task 1 留下的兼容垫片与受影响既有测试 fixture。
+- **Acceptance Criteria Addressed**: AC-2, AC-3, AC-4, AC-5, AC-6, AC-10, AC-11, AC-15
+- **Test Requirements**:
+  - `rule` TR-3.1: 可重试失败后记录字段（attempts/category/summary/lastAttemptAt/nextAttemptAt）在内存与落盘 JSON 中正确；连续失败断言退避序列（30s 倍增、1h 封顶、含抖动边界）；证据：monitor 单测。
+  - `rule` TR-3.2: 用文件状态 store + 新 monitor 实例模拟重启：未到期不投递、到期恢复投递；证据：`monitor_external_test.go` 风格测试。
+  - `rule` TR-3.3: 确定 4xx 立即死信（attempts=1）、第 10 次可重试失败 attempt_limit 死信；死信后多个 poll 周期零自动投递；证据：单测。
+  - `rule` TR-3.4: 终态不计入 pending 上限；A destination 故障/淘汰不影响 B 正常送达；证据：双 destination 测试。
+  - `rule` TR-3.5: 注入时间的 delivered/dead_letter TTL 与死信容量裁剪测试；证据：单测。
+  - `rule` TR-3.6: Save 注入失败：远程成功不确认、失败尝试不落内存、batcher 无副作用；无锁时拒绝写入；证据：故障注入测试。
+  - `rule` TR-3.7: 既有全部 chatbridge 测试通过（bootstrap/游标/waiting 迁移/抑制/policy/drain/淘汰等）；证据：`go test ./internal/service/chatbridge/...`。
+- **Completion Evidence**:
+  - 新文件 `delivery_lifecycle.go`：指数退避（30s→1h，±20% 抖动）、尝试落账、Retry-After 取大、立即死信（client_error/configuration）、attempt_limit 死信、终态 TTL+容量裁剪；失败/确认/重开全部经既有 `applyStateTransitionLocked` 事务。
+  - TR-3.1/3.3 pass：`delivery_lifecycle_test.go` 退避序列（10/20/40/80ms 精确断言）、上限死信、404 立即死信、configuration 原因。
+  - TR-3.2 pass：`TestMonitor_BackoffScheduleSurvivesRestart`（持久化 nextAttemptAt，新实例到期前零投递、到期后送达）+ requeue 到期过滤单测。
+  - TR-3.4 pass：`TestMonitor_FailingDestinationDoesNotBlockHealthyOne`（事件级计数，A 全死信/B 全送达）、`TestTrimPendingNotifications_IgnoresTerminalRecords`。
+  - TR-3.5 pass：`TestPruneTerminalRecords_TTLAndCap`（delivered 2h、dead 14d TTL 与每 destination 容量裁剪）。
+  - TR-3.6 pass：`TestMonitor_SaveFailureDoesNotRecordAttempt` + 既有 Save 失败测试保持；fence 路径未改动。
+  - TR-3.7/2.3 pass：`go test -race ./internal/service/chatbridge/... ./internal/service/notification/... ./internal/service/incident/...` 全绿；fake bool transport 全部旧用例通过；移除 destination 的终态保留由改写后的 `TestNotificationMonitor_RemovedDestinationsDropPendingButRetainTerminalRecords` 守护。
+  - 死信记录在新事件同 key 到达时以 generation+1 重开（`resetRecordToPending`），为 Task 5 复用。
+
+## Task 4: 投递参数配置化
+- **Status**: `completed`
+- **Priority**: medium
+- **Depends On**: Task 3
+- **Description**:
+  - 在 `internal/cmn/config` 增加通知投递配置节（maxAttempts、initialBackoff、maxBackoff、deadLetterTTL、deadLetterLimit），遵循现有配置默认值与 duration 解析模式；零值/非法回退默认。
+  - 在 `internal/service/scheduler/monitors.go`、`internal/service/frontend/server.go`（含事故 cfg）将配置映射到 `NotificationMonitorConfig`；standalone server 与 start-all 两条装配路径一致。
+  - 配置文档/默认配置样例若仓库有对应生成位置则同步。
+- **Acceptance Criteria Addressed**: AC-12, AC-13
+- **Test Requirements**:
+  - `rule` TR-4.1: 自定义值正确装配进通知/事故 monitor，零值取默认；证据：config 解析测试 + 装配层断言。
+  - `rule` TR-4.2: `go test ./internal/cmn/config/...` 与 `go build ./...` 通过；证据：命令输出。
+- **Completion Evidence**:
+  - 新增 `notification.delivery` 配置节（config 结构体 + Definition + viper 默认 + env 绑定 + 校验 + 警告），默认 10/30s/1h/336h/1000。
+  - scheduler `applyDeliveryConfig` 与 frontend `applyNotificationDeliveryConfig` 同时注入通知与事故 monitor；零值由 chatbridge normalize 兜底。
+  - TR-4.1 pass：`notification_delivery_config_test.go` 默认/覆盖/非法 duration；`TestNormalizeNotificationMonitorConfig_DefaultsPendingLimit` 扩展断言新字段；`TestLoad_Env`/`TestLoad_YAML` 期望值同步。
+  - TR-4.2 pass：`go test ./internal/cmn/config/ ./internal/service/scheduler/ ./internal/service/frontend/` 绿；`go build ./...` 绿。
+
+## Task 5: 查询/详情/重驱方法与活动 monitor 注册表
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: Task 3
+- **Description**:
+  - 在 chatbridge 新增 `MonitorRegistry`（按通知/事故各一）：monitor 获取租约进入 session 时注册自身、释放/standby 时仅在仍为自己时注销；`NewNotificationMonitor` 增加可选 registry 注入（方法或 option，避免破坏既有构造）。
+  - monitor 新增查询方法：从 `stateStore.Load` 直接读取最新已提交状态（无需租约），支持状态集合过滤、destination 过滤、keyset 分页（updatedAt 倒序 + destination/key tie-break，不透明游标，limit 默认 50/上限 200），返回包含 FR-4.1 字段的 DTO；详情方法按 destination+key 返回单条。
+  - monitor 新增 `Redrive` 方法：必须本实例持锁（fence）；单次状态事务内串行处理一批引用：dead_letter→pending（attempts=0、generation+1、清错误/退避/死信字段、nextAttemptAt 立即、updatedAt），持久化成功后才将事件 enqueue 进当前 batcher；pending→already_pending、delivered→delivered、缺失→not_found；返回每条结果与代际。
+  - recordId 编解码工具（base64url(destination,key)），非法 id 稳定报错；不改 SourceCursor；不新增重复记录。
+  - 无持锁实例的对外错误（哨兵 error，供 API 映射 503）。
+- **Acceptance Criteria Addressed**: AC-8, AC-9, AC-10, AC-15
+- **Test Requirements**:
+  - `rule` TR-5.1: 构造多状态/多 destination 记录，断言过滤、排序、翻页无重复遗漏、空结果、limit 截断与非法游标报错；证据：chatbridge 查询测试。
+  - `rule` TR-5.2: dead_letter 重驱后字段重置、generation+1、恰好一次入 batcher；并发/重复重驱代际差≤1 且结果码分别为 redriven/already_pending/delivered/not_found；证据：并发单测（-race）。
+  - `rule` TR-5.3: registry 在持锁/释放/锁丢失切换后 Active 指向正确；standby monitor 查询可读、重驱返回哨兵错误；证据：注册表测试。
+  - `rule` TR-5.4: 重驱 Save 失败时无代际变更、无入队；证据：故障注入测试。
+- **Completion Evidence**:
+  - `delivery_query.go`：`DeliveryRecordView/Filter/Page`、opaque base64 游标（updatedAt nano+destination+key）、List/Get、recordId 编解码、`RedriveDeliveryRecords`（fence→单事务 generation+1/字段重置→持久化后入 batcher）；`ErrDeliveryControllerInactive` 哨兵。
+  - `monitor_registry.go`：SetActive/ClearActive（仅当自己）/Active；monitor 在持锁 session 与无锁路径 register、endNotificationSession 清理；`SetRegistry` 注入不破坏构造签名。
+  - TR-5.1 pass：`TestMonitor_ListDeliveryRecordsFiltersAndPaginates`（排序/翻页无重复遗漏/状态+destination 过滤/非法游标）、`...ReadsCommittedStateFile`、`TestMonitor_GetDeliveryRecord`、`TestDeliveryRecordID_RoundTrip`。
+  - TR-5.2 pass：`TestMonitor_RedriveDeadLetterReopensGenerationOnce`（redriven/already_pending/delivered/not_found、generation 3、attempts/错误清空、恰好一次入队、重复幂等）。
+  - 并发：`TestMonitor_RedriveConcurrentRequestsBumpGenerationOnce`（16 caller，仅一次 redriven，generation=5）race 下通过。
+  - TR-5.3 pass：`TestMonitorRegistry_ActiveFollowsLeaseOwnership`（stale owner 不清新 owner）。
+  - TR-5.4 pass：`TestMonitor_RedriveSaveFailureDoesNotMutateOrEnqueue`；无租约 fence `TestMonitor_RedriveWithoutLeaseReturnsInactive`。
+  - `go test -race ./internal/service/chatbridge/` 绿；`go build ./...` 绿。
+
+## Task 6: 调度器/前端装配贯通（注册表共享）
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: Task 4, Task 5
+- **Description**:
+  - 在 frontend file stores（`internal/service/frontend/file/stores.go`）与 scheduler 依赖（`scheduler/file/stores.go`、`scheduler.Dependencies`、start-all 的 deps 组装）中创建并共享通知/事故两个 registry；frontend server 与 scheduler 创建的 monitor 均注入同一 registry。
+  - `frontend.Server` 持有 registry 与本地 monitor/state 引用并暴露给 API 层；新增面向 API 的小适配器（列表/详情走本地 monitor 读方法，重驱走 registry.Active()）。
+  - standalone `dagu server` 路径验证本地 monitor 直接持锁可用。
+- **Acceptance Criteria Addressed**: AC-10, AC-13, AC-15
+- **Test Requirements**:
+  - `rule` TR-6.1: 同进程两个 monitor 竞争租约时，适配器重驱始终路由到持锁实例；锁切换后路由跟随；证据：集成风格测试或装配单测。
+  - `rule` TR-6.2: `go build ./...` 与 startall/server/scheduler 相关测试通过；证据：命令输出。
+- **Completion Evidence**:
+  - `frontend.Stores` 增加两个 registry，file stores 构造时创建，start-all 透传到 `scheduler.Dependencies`；standalone scheduler 自建 registry。
+  - scheduler/frontend 两侧 monitor 构造后 `SetRegistry`；`frontend.Server` 保存 monitor 引用并暴露 `NotificationDeliveryController()`/`IncidentDeliveryController()`（chatbridge `DeliveryController`：本地读盘、重驱走 registry.Active，无活动者返回 `ErrDeliveryControllerInactive`）。
+  - TR-6.1 pass：`TestDeliveryController_RoutesRedriveToLeaseOwner`（双 monitor 争锁，standby 控制器读盘+重驱路由给 owner，落盘 generation=2）；`TestDeliveryController_NoActiveOwnerReturnsInactive`。
+  - TR-6.2 pass：`go test ./internal/service/chatbridge/ -count=3`、scheduler/frontend 包测试、`go build ./...` 全绿（internal/cmd 唯一失败为 Windows PowerShell 缺 `printf` 的既有平台问题，与改动无关）。
+
+## Task 7: OpenAPI 与管理 API（通知 + 事故）
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: Task 5, Task 6
+- **Description**:
+  - 编辑 `api/v1/api.yaml`：新增 notification-deliveries 列表/详情/重驱与 incident-deliveries 同构路径；schema 含状态、类别、分页响应、重驱请求/逐条结果；错误码含无活动 controller 的 503 与非法参数 400。
+  - 运行 `make api` 生成；在 `internal/service/frontend/api/v1` 新文件实现 handler（通知复用 `requireNotificationManagement`，事故复用事故管理/许可网关），接入 api.go 接口与 server 装配；重驱写审计日志。
+  - `cd ui && pnpm gen:api` 重新生成前端客户端。
+- **Acceptance Criteria Addressed**: AC-8, AC-9, AC-10, AC-13
+- **Test Requirements**:
+  - `rule` TR-7.1: httptest 覆盖两接口的筛选/分页/详情/重驱结果映射、400/403/503 分支与权限拒绝；证据：`frontend/api/v1` 新测试。
+  - `rule` TR-7.2: 生成代码与 yaml 一致（`make api` 后无额外 diff）；证据：git diff 检查。
+- **Completion Evidence**:
+  - api.yaml 新增 6 个端点（notifications + incidents 各自 list/detail/redrive）与 9 个 schema；`go run oapi-codegen` 重新生成 `api.gen.go`（含嵌入 spec），无手工修改；`pnpm gen:api` 重新生成 `schema.ts`。
+  - `deliveries.go` handler：状态/目的地/游标/limit 过滤、recordId 编解码、稳定结果映射、通知 developer 网关与事故管理网关、重驱审计（`notification_delivery_redrive`/`incident_delivery_redrive`）、无控制器/无持锁实例 503、非法入参 400、404。
+  - api.go 新增 `DeliveryManagementService` 接口与 per-request provider options；server.go 以闭包注入 `srv.NotificationDeliveryController()/IncidentDeliveryController()`，monitor 在 API 之后启动也安全。
+  - TR-7.1 pass：`deliveries_internal_test.go` 覆盖列表映射/过滤透传、坏游标 400、无控制器 503、详情 200/404/400、redrive 结果映射+空体/坏 id 400+503、事故网关、viewer 403；api/v1 全包测试绿。
+  - TR-7.2 pass：生成产物即来自当前 yaml（重新生成无额外差异）；`go build ./...` 绿。
+
+## Task 8: 前端投递记录页面（通知 + 事故）
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: Task 7
+- **Description**:
+  - `ui/src/App.tsx` 增加 `/notification-deliveries`（事故 `/incident-deliveries`）路由；`menu.tsx` 在对应导航组增加入口（沿用权限开关）；通知首页 Setup 区增加入口卡片。
+  - 新页面组件（放 `ui/src/pages/notifications` 或 feature 目录，遵循现有结构）：状态 tabs/chips（pending/delivered/dead-letter）、destination 过滤、游标分页表格（DAG、事件、attempts、类别、脱敏摘要、最近尝试、下次尝试、送达/死信时间/原因）；详情抽屉/对话框展示完整摘要；dead-letter 勾选批量 Redrive，逐条展示结果并刷新；沿用 `useClient`/`useQuery` 与现有 UI 组件、I18nText 英文默认文案模式。
+  - 事故页面同构（可复用组件参数化 scope）。
+- **Acceptance Criteria Addressed**: AC-13, AC-14
+- **Test Requirements**:
+  - `rule` TR-8.1: 组件测试覆盖筛选/分页/详情展示/重驱四类结果反馈；证据：`pnpm test`（新测试文件）。
+  - `rule` TR-8.2: `pnpm typecheck` 与 `pnpm build` 通过；证据：命令输出。
+  - `rubric` TR-8.3: 投递运维闭环可用性；1-5；1=无法定位失败；3=可查可重驱但反馈/操作不完整；5=筛选→详情→修复→批量重驱→结果确认闭环顺畅；阈值 >= 4；证据：组件实现走查 + 浏览器手工验证。
+- **Completion Evidence**:
+  - 新增 `ui/src/pages/deliveries/`：共享 `DeliveryRecordsPage`（scope 参数化）+ 通知/事故两个默认导出；路由 `/notification-deliveries`（Developer 门）、`/incident-deliveries`（ActiveLicense Developer 门）。
+  - 菜单两个导航组各加 “Deliveries”（basePath 同步）；通知首页 Setup 增加 Delivery monitoring 卡片。
+  - 页面：pending/dead_letter/delivered/all tabs、destination 精确过滤、游标 Load more 合并去重分页、attempts/类别/脱敏摘要/最近尝试/下次尝试/终态时间表格、详情 Dialog（完整错误+时间）、dead-letter 行级与全选批量 Redrive、逐条结果计数反馈、刷新。
+  - `pnpm gen:api` 已重新生成 schema.ts（含枚举）。
+  - TR-8.1 pass：`__tests__/DeliveryRecordsPage.test.tsx` 4 用例（列表字段+初始 pending 查询、dead-letter 过滤+行级 redrive+结果反馈、批量勾选+redrive、incident scope 端点）。
+  - TR-8.2 pass：`pnpm typecheck` 干净；`pnpm build` 成功（仅既有的 bundle 体积告警）。
+  - TR-8.3：筛选→详情→修复→批量重驱→结果确认闭环齐全（浏览器走查在 Task 9 执行）。
+
+## Task 9: 全量验证与兼容性收口
+- **Status**: `pending`
+- **Priority**: high
+- **Depends On**: Task 1–8
+- **Description**:
+  - 运行 `go test ./internal/service/chatbridge/... ./internal/service/notification/... ./internal/service/incident/... ./internal/service/frontend/... ./internal/cmn/...`（race）、`make fmt`（审查 diff）、`make check`；前端 `pnpm test/typecheck/build`。
+  - 如通知语义存在 conformance 资产则运行 `make conformance`；无则说明并依赖 Go 测试。
+  - 浏览器端到端走查：制造 4xx 死信与 5xx 退避→页面查看→修复 channel→重驱成功；验证事故链路。
+- **Acceptance Criteria Addressed**: AC-11, AC-13, AC-14
+- **Test Requirements**:
+  - `rule` TR-9.1: 上述后端/前端命令全部通过，无遗留 fmt/lint diff；证据：命令输出汇总。
+  - `rule` TR-9.2: 端到端走查中退避、死信、分页筛选、脱敏详情、重驱结果、成功送达均符合预期；证据：浏览器验证记录（截图/步骤）。

@@ -288,6 +288,15 @@ func TestLoad_Env(t *testing.T) {
 			Enabled:       true,
 			RetentionDays: 1,
 		},
+		Notification: NotificationConfig{
+			Delivery: NotificationDeliveryConfig{
+				MaxAttempts:      10,
+				InitialBackoff:   30 * time.Second,
+				MaxBackoff:       time.Hour,
+				DeadLetterTTL:    14 * 24 * time.Hour,
+				DeadLetterLimit:  1000,
+			},
+		},
 		Webhooks: WebhooksConfig{
 			MaxPayloadSize: DefaultWebhookMaxPayloadSize,
 		},
@@ -972,6 +981,15 @@ scheduler:
 		EventStore: EventStoreConfig{
 			Enabled:       true,
 			RetentionDays: 1,
+		},
+		Notification: NotificationConfig{
+			Delivery: NotificationDeliveryConfig{
+				MaxAttempts:      10,
+				InitialBackoff:   30 * time.Second,
+				MaxBackoff:       time.Hour,
+				DeadLetterTTL:    14 * 24 * time.Hour,
+				DeadLetterLimit:  1000,
+			},
 		},
 		Webhooks: WebhooksConfig{
 			MaxPayloadSize: DefaultWebhookMaxPayloadSize,

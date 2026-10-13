@@ -29,6 +29,23 @@ const (
 	DefaultNotificationLockRetryInterval     = 50 * time.Millisecond
 	DefaultNotificationLockStaleThreshold    = 45 * time.Second
 
+	// DefaultNotificationMaxDeliveryAttempts bounds persistent per-record
+	// delivery attempts before a record dead-letters.
+	DefaultNotificationMaxDeliveryAttempts = 10
+	// DefaultNotificationDeliveryInitialBackoff is the first persistent retry
+	// wait; later attempts double up to DefaultNotificationDeliveryMaxBackoff.
+	DefaultNotificationDeliveryInitialBackoff = 30 * time.Second
+	DefaultNotificationDeliveryMaxBackoff     = time.Hour
+	// DefaultNotificationDeadLetterTTL bounds how long dead-lettered records
+	// remain visible for inspection, and DefaultNotificationDeadLetterLimit
+	// bounds their count per destination.
+	DefaultNotificationDeadLetterTTL   = 14 * 24 * time.Hour
+	DefaultNotificationDeadLetterLimit = 1000
+
+	// fallbackDeliveryFailureSummary is recorded when a transport reports a
+	// failure without a sanitized reason.
+	fallbackDeliveryFailureSummary = "notification delivery failed without a reported reason"
+
 	// DefaultNotificationLockStandbyRetryInterval paces a standby monitor
 	// in another process while it waits for the lease. It bounds the idle
 	// cost of standing by rather than startup latency, so it is far longer
@@ -55,19 +72,34 @@ type NotificationMonitorConfig struct {
 	SuccessWindow        time.Duration
 	PendingLimit         int
 	InterestedEventTypes []eventstore.EventType
+
+	// MaxDeliveryAttempts is the persistent attempt ceiling per record.
+	MaxDeliveryAttempts int
+	// DeliveryInitialBackoff and DeliveryMaxBackoff bound the exponential
+	// persistent backoff between batch delivery attempts.
+	DeliveryInitialBackoff time.Duration
+	DeliveryMaxBackoff     time.Duration
+	// DeadLetterTTL/DeadLetterLimit bound retained dead-letter records.
+	DeadLetterTTL   time.Duration
+	DeadLetterLimit int
 }
 
 // DefaultNotificationMonitorConfig returns the default monitor settings.
 func DefaultNotificationMonitorConfig() NotificationMonitorConfig {
 	return NotificationMonitorConfig{
-		PollInterval:         DefaultNotificationMonitorPollInterval,
-		SeenEvictInterval:    DefaultNotificationSeenEvictInterval,
-		SeenTTL:              DefaultNotificationSeenTTL,
-		FlushTimeout:         DefaultNotificationFlushTimeout,
-		UrgentWindow:         DefaultUrgentNotificationWindow,
-		SuccessWindow:        DefaultSuccessNotificationWindow,
-		PendingLimit:         DefaultNotificationPendingLimit,
-		InterestedEventTypes: append([]eventstore.EventType(nil), defaultInterestedNotificationEventTypes...),
+		PollInterval:           DefaultNotificationMonitorPollInterval,
+		SeenEvictInterval:      DefaultNotificationSeenEvictInterval,
+		SeenTTL:                DefaultNotificationSeenTTL,
+		FlushTimeout:           DefaultNotificationFlushTimeout,
+		UrgentWindow:           DefaultUrgentNotificationWindow,
+		SuccessWindow:          DefaultSuccessNotificationWindow,
+		PendingLimit:           DefaultNotificationPendingLimit,
+		InterestedEventTypes:   append([]eventstore.EventType(nil), defaultInterestedNotificationEventTypes...),
+		MaxDeliveryAttempts:    DefaultNotificationMaxDeliveryAttempts,
+		DeliveryInitialBackoff: DefaultNotificationDeliveryInitialBackoff,
+		DeliveryMaxBackoff:     DefaultNotificationDeliveryMaxBackoff,
+		DeadLetterTTL:          DefaultNotificationDeadLetterTTL,
+		DeadLetterLimit:        DefaultNotificationDeadLetterLimit,
 	}
 }
 
@@ -141,7 +173,17 @@ type NotificationMonitor struct {
 	sessionCancel context.CancelFunc
 	sessionLost   bool
 
+	// deliveryJitter returns [0,1); it is overridable in tests so the
+	// backoff schedule can be asserted deterministically.
+	deliveryJitter       func() float64
+	registry             *MonitorRegistry
 	lastBootstrapFailure string
+}
+
+// SetRegistry attaches the active-instance registry used to route management
+// operations to the lease-owning monitor. It must be called before Run.
+func (m *NotificationMonitor) SetRegistry(registry *MonitorRegistry) {
+	m.registry = registry
 }
 
 type queuedNotification struct {
@@ -178,6 +220,9 @@ func NewNotificationMonitor(
 		interested:   interestedEventTypeSet(cfg.InterestedEventTypes),
 		batcher:      NewNotificationBatcher(cfg.UrgentWindow, cfg.SuccessWindow),
 		state:        newNotificationMonitorState(),
+		deliveryJitter: func() float64 {
+			return deliveryRand.Float64()
+		},
 	}
 }
 
@@ -263,6 +308,7 @@ func (m *NotificationMonitor) Run(ctx context.Context) {
 
 	if m.lock == nil {
 		m.initializeSession(ctx)
+		m.registerActive()
 		m.runUnlockedLoop(ctx)
 		return
 	}
@@ -279,6 +325,7 @@ func (m *NotificationMonitor) Run(ctx context.Context) {
 		m.beginNotificationSession(cancel)
 		m.initializeSession(sessionCtx)
 		heartbeatDone := m.startNotificationLockHeartbeat(sessionCtx)
+		m.registerActive()
 
 		continueWaiting := m.runOwnedLoop(ctx, sessionCtx)
 
@@ -337,8 +384,8 @@ func (m *NotificationMonitor) IsDelivered(destination string, status *ir.DAGRunS
 	if destState == nil {
 		return false
 	}
-	_, ok := destState.Delivered[key]
-	return ok
+	record, ok := destState.Records[key]
+	return ok && record != nil && record.Status == DeliveryStatusDelivered
 }
 
 func (m *NotificationMonitor) initializeSession(ctx context.Context) {
@@ -424,7 +471,7 @@ func (m *NotificationMonitor) runUnlockedLoop(ctx context.Context) {
 			}
 			m.pollSource(ctx)
 		case <-evictTicker.C:
-			m.evictStaleDelivered(ctx)
+			m.evictTerminalRecords(ctx, time.Now().UTC())
 		case <-m.batcherReadyC():
 		}
 	}
@@ -461,7 +508,7 @@ func (m *NotificationMonitor) runOwnedLoop(parentCtx, sessionCtx context.Context
 			}
 			m.pollSource(sessionCtx)
 		case <-evictTicker.C:
-			m.evictStaleDelivered(sessionCtx)
+			m.evictTerminalRecords(sessionCtx, time.Now().UTC())
 		case <-m.batcherReadyC():
 		}
 	}
@@ -699,9 +746,12 @@ func (m *NotificationMonitor) requeuePending(ctx context.Context, destinations [
 			if _, ok := allowed[destination]; !ok || destState == nil {
 				continue
 			}
-			for key, event := range destState.Pending {
-				if shouldSuppressNotificationEvent(event) {
-					delete(destState.Pending, key)
+			for key, record := range destState.Records {
+				if !record.isPending() || record.Event == nil {
+					continue
+				}
+				if shouldSuppressNotificationEvent(*record.Event) {
+					delete(destState.Records, key)
 					changed = true
 				}
 			}
@@ -717,11 +767,9 @@ func (m *NotificationMonitor) requeuePending(ctx context.Context, destinations [
 		if _, ok := allowed[destination]; !ok || destState == nil {
 			continue
 		}
-		for _, event := range destState.Pending {
-			if event.Status == nil || event.Key == "" {
-				continue
-			}
-			if shouldSuppressNotificationEvent(event) {
+		for _, record := range destState.Records {
+			event, ok := record.dueNotificationEvent(time.Now())
+			if !ok {
 				continue
 			}
 			queued = append(queued, queuedNotification{
@@ -795,11 +843,30 @@ func (m *NotificationMonitor) flushPendingBatch(ctx context.Context, pending Not
 	}
 	defer cancel()
 
-	acked := m.transport.FlushNotificationBatch(flushCtx, pending.Destination, pending.Batch, allowLLM)
-	if acked {
+	outcome := m.deliverBatch(flushCtx, pending.Destination, pending.Batch, allowLLM)
+	if outcome.Delivered {
 		m.markBatchDelivered(ctx, pending.Destination, pending.Batch)
+		return true
 	}
-	return acked
+	m.recordBatchDeliveryFailure(ctx, pending.Destination, pending.Batch, outcome)
+	return false
+}
+
+// deliverBatch invokes the transport, preferring the structured-result
+// interface when available and falling back to the legacy boolean result.
+func (m *NotificationMonitor) deliverBatch(ctx context.Context, destination string, batch NotificationBatch, allowLLM bool) DeliveryOutcome {
+	if detailed, ok := m.transport.(DetailedNotificationTransport); ok {
+		return detailed.FlushNotificationBatchWithResult(ctx, destination, batch, allowLLM)
+	}
+	if m.transport.FlushNotificationBatch(ctx, destination, batch, allowLLM) {
+		return DeliveredDeliveryOutcome()
+	}
+	return DeliveryOutcome{
+		Delivered: false,
+		Retryable: true,
+		Category:  DeliveryErrorUnknown,
+		Summary:   fallbackDeliveryFailureSummary,
+	}
 }
 
 func (m *NotificationMonitor) shouldDeliverBatch(batch NotificationBatch) bool {
@@ -848,43 +915,26 @@ func (m *NotificationMonitor) markBatchDelivered(ctx context.Context, destinatio
 			if event.Key == "" {
 				continue
 			}
-			if _, ok := destState.Pending[event.Key]; ok {
-				delete(destState.Pending, event.Key)
+			record, ok := destState.Records[event.Key]
+			if ok && record != nil && record.Status == DeliveryStatusPending {
+				destState.Records[event.Key] = deliveredRecordFromPending(record, event, now)
 				changed = true
-			}
-			// Refresh the delivery timestamp on each successful acknowledgement so
-			// TTL-based eviction retains recently retried deliveries.
-			if deliveredAt, ok := destState.Delivered[event.Key]; !ok || !deliveredAt.Equal(now) {
-				destState.Delivered[event.Key] = now
-				changed = true
-			}
-		}
-		return changed
-	})
-	m.stateMu.Unlock()
-}
-
-func (m *NotificationMonitor) evictStaleDelivered(ctx context.Context) {
-	if !m.ensureNotificationLockOwnership("Notification lock lost before evicting delivered notifications") {
-		return
-	}
-
-	cutoff := time.Now().Add(-m.cfg.SeenTTL)
-	changed := false
-
-	m.stateMu.Lock()
-	m.applyStateTransitionLocked(ctx, func(candidate *notificationMonitorState) bool {
-		changed = false
-		for _, destination := range candidate.Destinations {
-			if destination == nil {
 				continue
 			}
-			for key, deliveredAt := range destination.Delivered {
-				if deliveredAt.Before(cutoff) {
-					delete(destination.Delivered, key)
+			// Refresh the delivery timestamp on each successful acknowledgement so
+			// TTL-based eviction retains recently retried deliveries. Keys without a
+			// live record are still acknowledged defensively, matching the historical
+			// state-machine behavior.
+			if ok && record != nil && record.Status == DeliveryStatusDelivered {
+				if record.DeliveredAt == nil || !record.DeliveredAt.Equal(now) {
+					record.DeliveredAt = &now
+					record.UpdatedAt = now
 					changed = true
 				}
+				continue
 			}
+			destState.Records[event.Key] = newDeliveredRecordFromEvent(event, now)
+			changed = true
 		}
 		return changed
 	})
@@ -1121,11 +1171,17 @@ func (m *NotificationMonitor) beginNotificationSession(cancel context.CancelFunc
 }
 
 func (m *NotificationMonitor) endNotificationSession() {
+	m.registry.ClearActive(m)
 	m.sessionMu.Lock()
-	defer m.sessionMu.Unlock()
-
 	m.sessionCancel = nil
 	m.sessionLost = false
+	m.sessionMu.Unlock()
+}
+
+func (m *NotificationMonitor) registerActive() {
+	if m.registry != nil {
+		m.registry.SetActive(m)
+	}
 }
 
 func (m *NotificationMonitor) signalLockLoss(message string, err error) {
@@ -1293,6 +1349,25 @@ func normalizeNotificationMonitorConfig(cfg *NotificationMonitorConfig) {
 	if cfg.InterestedEventTypes == nil {
 		cfg.InterestedEventTypes = append([]eventstore.EventType(nil), defaults.InterestedEventTypes...)
 	}
+	if cfg.MaxDeliveryAttempts <= 0 {
+		cfg.MaxDeliveryAttempts = defaults.MaxDeliveryAttempts
+	}
+	if cfg.DeliveryInitialBackoff <= 0 {
+		cfg.DeliveryInitialBackoff = defaults.DeliveryInitialBackoff
+	}
+	if cfg.DeliveryMaxBackoff <= 0 {
+		cfg.DeliveryMaxBackoff = defaults.DeliveryMaxBackoff
+	}
+	if cfg.DeliveryInitialBackoff > cfg.DeliveryMaxBackoff {
+		cfg.DeliveryInitialBackoff = defaults.DeliveryInitialBackoff
+		cfg.DeliveryMaxBackoff = defaults.DeliveryMaxBackoff
+	}
+	if cfg.DeadLetterTTL <= 0 {
+		cfg.DeadLetterTTL = defaults.DeadLetterTTL
+	}
+	if cfg.DeadLetterLimit <= 0 {
+		cfg.DeadLetterLimit = defaults.DeadLetterLimit
+	}
 }
 
 func cloneNotificationMonitorState(state notificationMonitorState) notificationMonitorState {
@@ -1307,18 +1382,16 @@ func cloneNotificationMonitorState(state notificationMonitorState) notificationM
 	for destination, destState := range state.Destinations {
 		if destState == nil {
 			clone.Destinations[destination] = &notificationDestinationState{
-				Pending:   make(map[string]NotificationEvent),
-				Delivered: make(map[string]time.Time),
+				Records: make(map[string]*notificationDeliveryRecord),
 			}
 			continue
 		}
-		pending := make(map[string]NotificationEvent, len(destState.Pending))
-		for key, event := range destState.Pending {
-			pending[key] = cloneNotificationEvent(event)
+		records := make(map[string]*notificationDeliveryRecord, len(destState.Records))
+		for key, record := range destState.Records {
+			records[key] = cloneDeliveryRecord(record)
 		}
 		clone.Destinations[destination] = &notificationDestinationState{
-			Pending:   pending,
-			Delivered: maps.Clone(destState.Delivered),
+			Records: records,
 		}
 	}
 	clone.normalize()
@@ -1335,8 +1408,7 @@ func ensureDestinations(state *notificationMonitorState, destinations []string) 
 			continue
 		}
 		state.Destinations[destination] = &notificationDestinationState{
-			Pending:   make(map[string]NotificationEvent),
-			Delivered: make(map[string]time.Time),
+			Records: make(map[string]*notificationDeliveryRecord),
 		}
 		changed = true
 	}
@@ -1354,11 +1426,24 @@ func reconcileDestinations(state *notificationMonitorState, destinations []strin
 
 	changed := ensureDestinations(state, destinations)
 	removed := make([]string, 0)
-	for destination := range state.Destinations {
+	for destination, destState := range state.Destinations {
 		if _, ok := allowed[destination]; ok {
 			continue
 		}
-		delete(state.Destinations, destination)
+		// Pending records cannot be delivered once the destination
+		// configuration is gone; terminal records are retained for operator
+		// inspection until their TTL/cap pruning runs.
+		if destState != nil {
+			for key, record := range destState.Records {
+				if record.isPending() {
+					delete(destState.Records, key)
+					changed = true
+				}
+			}
+		}
+		if destState == nil || len(destState.Records) == 0 {
+			delete(state.Destinations, destination)
+		}
 		removed = append(removed, destination)
 		changed = true
 	}
@@ -1367,25 +1452,21 @@ func reconcileDestinations(state *notificationMonitorState, destinations []strin
 }
 
 func destinationState(state *notificationMonitorState, destination string) *notificationDestinationState {
+	empty := &notificationDestinationState{
+		Records: make(map[string]*notificationDeliveryRecord),
+	}
 	if destination == "" {
-		return &notificationDestinationState{
-			Pending:   make(map[string]NotificationEvent),
-			Delivered: make(map[string]time.Time),
-		}
+		return empty
 	}
 	current, ok := state.Destinations[destination]
 	if !ok || current == nil {
 		current = &notificationDestinationState{
-			Pending:   make(map[string]NotificationEvent),
-			Delivered: make(map[string]time.Time),
+			Records: make(map[string]*notificationDeliveryRecord),
 		}
 		state.Destinations[destination] = current
 	}
-	if current.Pending == nil {
-		current.Pending = make(map[string]NotificationEvent)
-	}
-	if current.Delivered == nil {
-		current.Delivered = make(map[string]time.Time)
+	if current.Records == nil {
+		current.Records = make(map[string]*notificationDeliveryRecord)
 	}
 	return current
 }
@@ -1404,7 +1485,7 @@ func enqueueNotifications(state *notificationMonitorState, destinations []string
 				continue
 			}
 			if shouldSuppressNotificationEvent(event) {
-				if removePendingNotificationsForRun(destState, NotificationRunKey(event.Status)) {
+				if removePendingRecordsForRun(destState, NotificationRunKey(event.Status)) {
 					changed = true
 				}
 				continue
@@ -1413,34 +1494,50 @@ func enqueueNotifications(state *notificationMonitorState, destinations []string
 				changed = true
 				continue
 			}
-			if _, ok := destState.Delivered[event.Key]; ok {
-				continue
-			}
-			if pending, ok := destState.Pending[event.Key]; ok {
-				if shouldSuppressNotificationEvent(pending) {
-					delete(destState.Pending, event.Key)
-				} else {
-					queued = append(queued, queuedNotification{
-						destination: destination,
-						event:       pending,
-					})
-					accepted = true
+			var previousRecord *notificationDeliveryRecord
+			if record, ok := destState.Records[event.Key]; ok && record != nil {
+				if record.Status == DeliveryStatusDelivered {
 					continue
 				}
+				if record.Status == DeliveryStatusPending {
+					if pending, pendingOK := record.notificationEvent(); pendingOK {
+						if shouldSuppressNotificationEvent(pending) {
+							delete(destState.Records, event.Key)
+							changed = true
+						} else {
+							queued = append(queued, queuedNotification{
+								destination: destination,
+								event:       pending,
+							})
+							accepted = true
+						}
+						continue
+					}
+				}
+				previousRecord = record
 			}
 
 			runKey := NotificationRunKey(event.Status)
-			for pendingKey, pending := range destState.Pending {
-				if pending.Status == nil {
+			for recordKey, record := range destState.Records {
+				pending, ok := record.notificationEvent()
+				if !ok {
 					continue
 				}
-				if NotificationRunKey(pending.Status) != runKey || pendingKey == event.Key {
+				if NotificationRunKey(pending.Status) != runKey || recordKey == event.Key {
 					continue
 				}
-				delete(destState.Pending, pendingKey)
+				delete(destState.Records, recordKey)
 			}
 
-			destState.Pending[event.Key] = cloneNotificationEvent(event)
+			observedAt := event.ObservedAt
+			if observedAt.IsZero() {
+				observedAt = time.Now().UTC()
+			}
+			if previousRecord != nil && previousRecord.Status == DeliveryStatusDeadLetter {
+				destState.Records[event.Key] = resetRecordToPending(previousRecord, event, observedAt)
+			} else {
+				destState.Records[event.Key] = newPendingDeliveryRecord(event, observedAt)
+			}
 			queued = append(queued, queuedNotification{
 				destination: destination,
 				event:       event,
@@ -1465,13 +1562,25 @@ func trimPendingNotifications(state *notificationMonitorState, limit int) pendin
 
 	evicted := make(pendingEvictions)
 	for destination, destState := range state.Destinations {
-		if destState == nil || len(destState.Pending) <= limit {
+		if destState == nil {
+			continue
+		}
+		pendingCount := 0
+		for _, record := range destState.Records {
+			if record.isPending() {
+				pendingCount++
+			}
+		}
+		if pendingCount <= limit {
 			continue
 		}
 
-		candidates := make([]candidate, 0, len(destState.Pending))
-		for key, event := range destState.Pending {
-			candidates = append(candidates, candidate{key: key, observedAt: event.ObservedAt})
+		candidates := make([]candidate, 0, pendingCount)
+		for key, record := range destState.Records {
+			if !record.isPending() {
+				continue
+			}
+			candidates = append(candidates, candidate{key: key, observedAt: record.observedAt()})
 		}
 		slices.SortFunc(candidates, func(a, b candidate) int {
 			if !a.observedAt.Equal(b.observedAt) {
@@ -1492,7 +1601,7 @@ func trimPendingNotifications(state *notificationMonitorState, limit int) pendin
 
 		keys := make(map[string]struct{}, len(candidates)-limit)
 		for _, candidate := range candidates[:len(candidates)-limit] {
-			delete(destState.Pending, candidate.key)
+			delete(destState.Records, candidate.key)
 			keys[candidate.key] = struct{}{}
 		}
 		evicted[destination] = keys
@@ -1527,14 +1636,25 @@ func migrateWaitingDelivery(destState *notificationDestinationState, event Notif
 	if legacyKey == event.Key {
 		return false
 	}
-	deliveredAt, ok := destState.Delivered[legacyKey]
+	record, ok := destState.Records[legacyKey]
+	if !ok || record == nil || record.Status != DeliveryStatusDelivered {
+		return false
+	}
+	deliveredAt := record.DeliveredAt
+	if deliveredAt == nil {
+		deliveredAt = &record.UpdatedAt
+	}
 	// A later event cannot be the occurrence recorded by the legacy delivery.
-	if !ok || event.ObservedAt.IsZero() || deliveredAt.Before(event.ObservedAt) {
+	if event.ObservedAt.IsZero() || deliveredAt.Before(event.ObservedAt) {
 		return false
 	}
 
-	delete(destState.Delivered, legacyKey)
-	destState.Delivered[event.Key] = deliveredAt
+	delete(destState.Records, legacyKey)
+	migrated := cloneDeliveryRecord(record)
+	if migrated.Summary != nil {
+		migrated.Summary.Key = event.Key
+	}
+	destState.Records[event.Key] = migrated
 	return true
 }
 
@@ -1636,16 +1756,17 @@ func uniqueDestinations(values []string) []string {
 	return result
 }
 
-func removePendingNotificationsForRun(destState *notificationDestinationState, runKey string) bool {
+func removePendingRecordsForRun(destState *notificationDestinationState, runKey string) bool {
 	if destState == nil || runKey == "" {
 		return false
 	}
 	changed := false
-	for pendingKey, pending := range destState.Pending {
-		if pending.Status == nil || NotificationRunKey(pending.Status) != runKey {
+	for recordKey, record := range destState.Records {
+		pending, ok := record.notificationEvent()
+		if !ok || NotificationRunKey(pending.Status) != runKey {
 			continue
 		}
-		delete(destState.Pending, pendingKey)
+		delete(destState.Records, recordKey)
 		changed = true
 	}
 	return changed

@@ -43,6 +43,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/schedulerstate"
 	secretpkg "github.com/dagucloud/dagu/v2/internal/secret"
 	authservice "github.com/dagucloud/dagu/v2/internal/service/auth"
+	"github.com/dagucloud/dagu/v2/internal/service/chatbridge"
 	"github.com/dagucloud/dagu/v2/internal/service/coordinator"
 	"github.com/dagucloud/dagu/v2/internal/service/frontend/api/pathutil"
 	frontendauth "github.com/dagucloud/dagu/v2/internal/service/frontend/auth"
@@ -89,6 +90,10 @@ type API struct {
 	eventService         *eventstore.Service
 	incidentService      IncidentService
 	notificationService  NotificationService
+	// Providers are resolved per request because the monitors are created
+	// after the API during server startup.
+	notificationDeliveryProvider func() DeliveryManagementService
+	incidentDeliveryProvider     func() DeliveryManagementService
 	syncService          SyncService
 	tunnelService        *tunnel.Service
 	defaultExecMode      config.ExecutionMode
@@ -236,6 +241,44 @@ func WithIncidentService(is IncidentService) APIOption {
 	return func(a *API) {
 		a.incidentService = is
 	}
+}
+
+// DeliveryManagementService serves delivery lifecycle list/detail/redrive
+// operations for one monitor kind.
+type DeliveryManagementService interface {
+	ListDeliveryRecords(ctx context.Context, filter chatbridge.DeliveryRecordFilter, cursor string, limit int) (chatbridge.DeliveryRecordPage, error)
+	GetDeliveryRecord(ctx context.Context, destination, eventKey string) (chatbridge.DeliveryRecordView, bool, error)
+	RedriveDeliveryRecords(ctx context.Context, refs []chatbridge.DeliveryRecordRef) ([]chatbridge.DeliveryRedriveResult, error)
+}
+
+// WithNotificationDeliveryController wires the notification delivery
+// controller. The provider is resolved per request because monitors start
+// after the API is constructed.
+func WithNotificationDeliveryController(provider func() DeliveryManagementService) APIOption {
+	return func(a *API) {
+		a.notificationDeliveryProvider = provider
+	}
+}
+
+// WithIncidentDeliveryController wires the incident delivery controller.
+func WithIncidentDeliveryController(provider func() DeliveryManagementService) APIOption {
+	return func(a *API) {
+		a.incidentDeliveryProvider = provider
+	}
+}
+
+func (a *API) notificationDeliveryService() DeliveryManagementService {
+	if a.notificationDeliveryProvider == nil {
+		return nil
+	}
+	return a.notificationDeliveryProvider()
+}
+
+func (a *API) incidentDeliveryService() DeliveryManagementService {
+	if a.incidentDeliveryProvider == nil {
+		return nil
+	}
+	return a.incidentDeliveryProvider()
 }
 
 // WithSyncService returns an APIOption that sets the API's SyncService.

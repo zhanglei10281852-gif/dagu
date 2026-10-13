@@ -122,9 +122,11 @@ type Dependencies struct {
 	NotificationStore    notification.Store
 	NotificationState    chatbridge.StateStore
 	NewNotificationLease func() chatbridge.Lease
+	NotificationMonitorRegistry *chatbridge.MonitorRegistry
 	IncidentStore        incident.Store
 	IncidentState        chatbridge.StateStore
 	NewIncidentLease     func() chatbridge.Lease
+	IncidentMonitorRegistry *chatbridge.MonitorRegistry
 	LicenseManager       *license.Manager
 }
 
